@@ -1,0 +1,34 @@
+services:
+  api:
+    build: .
+    environment:
+      SERVICE_MODE: api
+      HTTP_HOST: 0.0.0.0
+      BESU_RPC_URL: ${BESU_RPC_URL:-http://host.docker.internal:8545}
+      SQLITE_PATH: /data/indexer.sqlite
+    ports:
+      - "8080:8080"
+    volumes:
+      - indexer-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  indexer:
+    build: .
+    environment:
+      SERVICE_MODE: indexer
+      BESU_RPC_URL: ${BESU_RPC_URL:-http://host.docker.internal:8545}
+      SQLITE_PATH: /data/indexer.sqlite
+      INDEXER_CONTRACT_ADDRESSES: ${INDEXER_CONTRACT_ADDRESSES:?set contract addresses}
+      INDEXER_TOPIC0: ${INDEXER_TOPIC0:-}
+      INDEXER_START_BLOCK: ${INDEXER_START_BLOCK:-}
+      INDEXER_CONFIRMATIONS: ${INDEXER_CONFIRMATIONS:-0}
+    volumes:
+      - indexer-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  indexer-data:

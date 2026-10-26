@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Besu Explorer</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">Blockscout / Etherscan compatible API</p>
+        <h1>Private Besu Explorer</h1>
+        <p class="subtitle">Read live chain state and indexed contract events without PostgreSQL or Redis.</p>
+      </div>
+      <nav class="header-links">
+        <a class="docs" href="/swagger">Swagger</a>
+        <a class="docs" href="/postman/besu-etherscan-compatible.postman_collection.json" download>Postman</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="panel network-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Network</p>
+            <h2>Current head</h2>
+          </div>
+          <button id="refresh-network" type="button">Refresh</button>
+        </div>
+        <div id="network-summary" class="summary-grid" aria-live="polite"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">SQLite event index</p>
+            <h2>Indexed contracts</h2>
+            <p class="section-help">These are the contract and topic filters currently persisted by the indexer. Select one to search its events.</p>
+          </div>
+          <button id="refresh-indexed-contracts" type="button">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Contract</th><th>Topic 0</th><th>Indexed range</th><th></th></tr>
+            </thead>
+            <tbody id="indexed-contracts"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="lookup-grid">
+        <article class="panel">
+          <p class="eyebrow">Block lookup</p>
+          <h2>Block</h2>
+          <form data-endpoint="blocks">
+            <label for="block-id">Number, tag, or hash</label>
+            <div class="input-row">
+              <input id="block-id" name="value" placeholder="latest or 123" required>
+              <button type="submit">Fetch</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel">
+          <p class="eyebrow">Transaction lookup</p>
+          <h2>Transaction</h2>
+          <form data-endpoint="transactions">
+            <label for="transaction-id">Transaction hash</label>
+            <div class="input-row">
+              <input id="transaction-id" name="value" placeholder="0x…" required>
+              <button type="submit">Fetch</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel">
+          <p class="eyebrow">Address lookup</p>
+          <h2>Address</h2>
+          <form data-endpoint="addresses">
+            <label for="address-id">Wallet or contract address</label>
+            <div class="input-row">
+              <input id="address-id" name="value" placeholder="0x…" required>
+              <button type="submit">Fetch</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel">
+          <p class="eyebrow">Indexed event lookup</p>
+          <h2>Contract logs</h2>
+          <form id="logs-form">
+            <label for="logs-address">Contract address</label>
+            <input id="logs-address" name="address" placeholder="0x…" spellcheck="false" required>
+            <label for="logs-topic0">Topic 0 (optional event signature)</label>
+            <input id="logs-topic0" name="topic0" placeholder="0x…" spellcheck="false">
+            <div class="input-row">
+              <input name="fromBlock" value="0" aria-label="From block" required>
+              <button type="submit">Fetch logs</button>
+            </div>
+          </form>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Deployment preparation</p>
+            <h2>Transaction RPC API</h2>
+            <p class="section-help">Use these checks before creating a contract deployment transaction. Results appear immediately on the right.</p>
+          </div>
+        </div>
+        <div class="deployment-layout">
+          <div class="deployment-controls">
+            <div class="tool-group">
+              <div class="step-heading"><span>1</span><div><h3>Check network fees</h3><p>No input required. Click any value to query Besu now.</p></div></div>
+              <div class="rpc-actions">
+                <button type="button" data-get="/api?module=proxy&amp;action=eth_chainId">Chain ID</button>
+                <button type="button" data-get="/api?module=block&amp;action=eth_block_number">Latest block</button>
+                <button type="button" data-get="/api?module=proxy&amp;action=eth_gasPrice">Legacy gas price</button>
+                <button type="button" data-get="/api?module=proxy&amp;action=eth_maxPriorityFeePerGas">Priority fee</button>
+                <button type="button" data-get="/api?module=proxy&amp;action=eth_feeHistory&amp;blockCount=10&amp;newestBlock=latest&amp;rewardPercentiles=10,50,90">EIP-1559 fee history</button>
+              </div>
+            </div>
+
+            <form id="nonce-form" class="tool-group">
+              <div class="step-heading"><span>2</span><div><h3>Get sender nonce</h3><p>Enter the Fireblocks wallet address. The pending nonce includes queued transactions.</p></div></div>
+              <label for="nonce-address">Wallet address</label>
+              <div class="input-row">
+                <input id="nonce-address" name="address" placeholder="0x… (40 hex characters)" spellcheck="false" required>
+                <button type="submit">Get pending nonce</button>
+              </div>
+            </form>
+
+            <form id="estimate-form" class="tool-group">
+              <div class="step-heading"><span>3</span><div><h3>Estimate or simulate deployment</h3><p>Paste the compiled contract creation bytecode. Constructor arguments must already be appended.</p></div></div>
+              <label for="deployment-from">Sender wallet address</label>
+              <input id="deployment-from" name="from" placeholder="0x… (Fireblocks wallet)" spellcheck="false" required>
+              <label for="deployment-data">Contract creation bytecode</label>
+              <textarea id="deployment-data" name="data" rows="6" placeholder="0x60806040…" spellcheck="false" required></textarea>
+              <label for="deployment-value">Native value in hex wei</label>
+              <input id="deployment-value" name="value" value="0x0" spellcheck="false" required>
+              <div class="rpc-actions">
+                <button type="submit">Estimate gas</button>
+                <button id="simulate-call" type="button">Simulate call</button>
+              </div>
+            </form>
+          </div>
+
+          <aside class="rpc-result" aria-live="polite">
+            <div class="result-heading">
+              <div>
+                <p class="eyebrow">Live result</p>
+                <h3 id="rpc-response-title">Choose an action</h3>
+              </div>
+              <span id="rpc-response-status" class="status">Waiting</span>
+            </div>
+            <code id="rpc-response-endpoint">No endpoint called yet</code>
+            <pre id="rpc-response-output">Click a network check, enter a wallet address, or estimate a deployment.</pre>
+          </aside>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Recent blocks</p>
+            <h2>Latest activity</h2>
+          </div>
+          <button id="refresh-blocks" type="button">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Height</th><th>Timestamp</th><th>Transactions</th><th>Gas used</th></tr>
+            </thead>
+            <tbody id="recent-blocks"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel response-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">API response</p>
+            <h2 id="response-title">Select a lookup</h2>
+          </div>
+          <span id="response-status" class="status"></span>
+        </div>
+        <pre id="response-output">No request sent yet.</pre>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

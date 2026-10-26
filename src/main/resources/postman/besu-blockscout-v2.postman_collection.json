@@ -1,0 +1,66 @@
+{
+  "info": {
+    "_postman_id": "01c8180d-9ce0-4b8f-a49b-55b125c5310b",
+    "name": "Besu Etherscan-Compatible Proxy",
+    "description": "Complete module/action API collection. Official Blockscout-compatible actions and local proxy compatibility extensions are separated into folders.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {"key": "baseUrl", "value": "http://127.0.0.1:8080"},
+    {"key": "address", "value": "0x0000000000000000000000000000000000000000"},
+    {"key": "secondAddress", "value": "0x0000000000000000000000000000000000000001"},
+    {"key": "transactionHash", "value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"key": "blockHash", "value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"key": "creationBytecode", "value": "0x6000"}
+    ,{"key": "topic0", "value": "0x0000000000000000000000000000000000000000000000000000000000000000"}
+  ],
+  "item": [
+    {
+      "name": "Official Blockscout-compatible actions",
+      "item": [
+        {"name": "account.balance", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=account&action=balance&address={{address}}&tag=latest"}},
+        {"name": "account.balancemulti", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=account&action=balancemulti&address={{address}},{{secondAddress}}&tag=latest"}},
+        {"name": "account.eth_get_balance", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=account&action=eth_get_balance&address={{address}}&block=latest"}},
+        {"name": "block.eth_block_number", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=block&action=eth_block_number"}},
+        {"name": "transaction.gettxreceiptstatus", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=transaction&action=gettxreceiptstatus&txhash={{transactionHash}}"}},
+        {"name": "transaction.getstatus", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=transaction&action=getstatus&txhash={{transactionHash}}"}},
+        {"name": "logs.getLogs", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=logs&action=getLogs&fromBlock=0&toBlock=latest&address={{address}}&topic0={{topic0}}&page=1&offset=100&sort=asc"}}
+      ]
+    },
+    {
+      "name": "Indexer discovery extension",
+      "item": [
+        {"name": "logs.getIndexedContracts", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=logs&action=getIndexedContracts"}}
+      ]
+    },
+    {
+      "name": "Proxy compatibility extensions",
+      "description": "Etherscan-style module/action wrappers for deployment-related Besu methods not defined by Blockscout's per-instance RPC action list.",
+      "item": [
+        {"name": "proxy.eth_chainId", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_chainId"}},
+        {"name": "proxy.eth_blockNumber", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_blockNumber"}},
+        {"name": "proxy.eth_getBalance", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_getBalance&address={{address}}&tag=latest"}},
+        {"name": "proxy.eth_getTransactionCount", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_getTransactionCount&address={{address}}&tag=pending"}},
+        {"name": "proxy.eth_gasPrice", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_gasPrice"}},
+        {"name": "proxy.eth_maxPriorityFeePerGas", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_maxPriorityFeePerGas"}},
+        {"name": "proxy.eth_feeHistory", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_feeHistory&blockCount=10&newestBlock=latest&rewardPercentiles=10,50,90"}},
+        {"name": "proxy.eth_estimateGas", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_estimateGas&from={{address}}&data={{creationBytecode}}&value=0x0&tag=pending"}},
+        {"name": "proxy.eth_call", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_call&from={{address}}&data={{creationBytecode}}&value=0x0&tag=pending"}},
+        {"name": "proxy.eth_getCode", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_getCode&address={{address}}&tag=latest"}},
+        {"name": "proxy.eth_getTransactionByHash", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_getTransactionByHash&txhash={{transactionHash}}"}},
+        {"name": "proxy.eth_getTransactionReceipt", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_getTransactionReceipt&txhash={{transactionHash}}"}},
+        {"name": "proxy.eth_getBlockByNumber", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_getBlockByNumber&tag=latest&boolean=true"}},
+        {"name": "proxy.eth_getBlockByHash", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=proxy&action=eth_getBlockByHash&blockhash={{blockHash}}&boolean=true"}}
+      ]
+    },
+    {
+      "name": "Infrastructure and documentation",
+      "item": [
+        {"name": "Health", "request": {"method": "GET", "url": "{{baseUrl}}/api/health"}},
+        {"name": "Liveness", "request": {"method": "GET", "url": "{{baseUrl}}/api/health/liveness"}},
+        {"name": "Readiness", "request": {"method": "GET", "url": "{{baseUrl}}/api/health/readiness"}},
+        {"name": "OpenAPI", "request": {"method": "GET", "url": "{{baseUrl}}/openapi.json"}}
+      ]
+    }
+  ]
+}

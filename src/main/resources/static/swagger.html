@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Besu Proxy API Documentation</title>
+    <link rel="stylesheet" href="/swagger.css">
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">Swagger / OpenAPI 3.0</p>
+        <h1>Besu Proxy API</h1>
+        <p id="api-description">Loading the API contract…</p>
+      </div>
+      <nav>
+        <a href="/">Explorer</a>
+        <a href="/openapi.json">OpenAPI JSON</a>
+        <a href="/postman/besu-etherscan-compatible.postman_collection.json" download>Download Postman</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="toolbar">
+        <label for="filter">Filter endpoints</label>
+        <input id="filter" type="search" placeholder="Try nonce, blocks, gas, POST…">
+        <span id="endpoint-count"></span>
+      </section>
+      <div id="api-status" role="status">Loading OpenAPI document…</div>
+      <section id="operations" class="operations" aria-live="polite"></section>
+    </main>
+
+    <template id="operation-template">
+      <article class="operation">
+        <button class="operation-summary" type="button" aria-expanded="false">
+          <span class="method"></span>
+          <code class="path"></code>
+          <span class="summary"></span>
+          <span class="chevron">⌄</span>
+        </button>
+        <div class="operation-details" hidden>
+          <p class="description"></p>
+          <div class="parameters"></div>
+          <div class="request-body"></div>
+          <div class="responses"></div>
+        </div>
+      </article>
+    </template>
+
+    <script src="/swagger.js" defer></script>
+  </body>
+</html>

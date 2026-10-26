@@ -1,0 +1,62 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Besu Etherscan-Compatible Proxy",
+    "version": "0.3.0",
+    "description": "Allowlisted Blockscout/Etherscan module-action API backed by Besu, with a lightweight SQLite contract-event index."
+  },
+  "servers": [{"url": "http://127.0.0.1:8080", "description": "Local proxy"}],
+  "paths": {
+    "/api?module=account&action=balance": {"get": {"summary": "Get native balance in wei", "tags": ["Official Blockscout-compatible"], "parameters": [{"$ref": "#/components/parameters/Address"}, {"$ref": "#/components/parameters/Tag"}], "responses": {"200": {"description": "Etherscan response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EtherscanStringResponse"}}}}}}},
+    "/api?module=account&action=balancemulti": {"get": {"summary": "Get native balances for up to 20 addresses", "tags": ["Official Blockscout-compatible"], "parameters": [{"name": "address", "in": "query", "required": true, "description": "Comma-separated addresses", "schema": {"type": "string"}}, {"$ref": "#/components/parameters/Tag"}], "responses": {"200": {"description": "Etherscan response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EtherscanResponse"}}}}}}},
+    "/api?module=account&action=eth_get_balance": {"get": {"summary": "Get balance in Ethereum JSON-RPC format", "tags": ["Official Blockscout-compatible"], "parameters": [{"$ref": "#/components/parameters/Address"}, {"name": "block", "in": "query", "schema": {"type": "string", "default": "latest"}}], "responses": {"200": {"description": "JSON-RPC response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JsonRpcResponse"}}}}}}},
+    "/api?module=block&action=eth_block_number": {"get": {"summary": "Get latest block number", "tags": ["Official Blockscout-compatible"], "responses": {"200": {"description": "JSON-RPC response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JsonRpcResponse"}}}}}}},
+    "/api?module=transaction&action=gettxreceiptstatus": {"get": {"summary": "Get transaction receipt status", "tags": ["Official Blockscout-compatible"], "parameters": [{"$ref": "#/components/parameters/TransactionHash"}], "responses": {"200": {"description": "Etherscan response with result.status equal to 0 or 1", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EtherscanResponse"}}}}}}},
+    "/api?module=transaction&action=getstatus": {"get": {"summary": "Get transaction execution status", "tags": ["Official Blockscout-compatible"], "parameters": [{"$ref": "#/components/parameters/TransactionHash"}], "responses": {"200": {"description": "Etherscan response with isError and errDescription", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EtherscanResponse"}}}}}}},
+    "/api?module=logs&action=getLogs": {"get": {"summary": "Query indexed contract event logs", "description": "Reads raw logs previously persisted by the configured SQLite indexer. Topic filters are combined with AND.", "tags": ["Official Blockscout-compatible"], "parameters": [{"name": "fromBlock", "in": "query", "schema": {"type": "string", "default": "0"}}, {"name": "toBlock", "in": "query", "schema": {"type": "string", "default": "latest"}}, {"name": "address", "in": "query", "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{40}$"}}, {"name": "topic0", "in": "query", "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{64}$"}}, {"name": "topic1", "in": "query", "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{64}$"}}, {"name": "topic2", "in": "query", "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{64}$"}}, {"name": "topic3", "in": "query", "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{64}$"}}, {"name": "page", "in": "query", "schema": {"type": "integer", "minimum": 1, "default": 1}}, {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}, {"name": "sort", "in": "query", "schema": {"type": "string", "enum": ["asc", "desc"], "default": "asc"}}], "responses": {"200": {"description": "Etherscan response containing raw indexed logs", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EtherscanResponse"}}}}}}},
+    "/api?module=logs&action=getIndexedContracts": {"get": {"summary": "List configured event indexes", "description": "Local discovery extension listing contract addresses, optional topic0 filters, and indexed block ranges persisted in SQLite.", "tags": ["Indexer discovery extension"], "responses": {"200": {"description": "Etherscan response containing configured index filters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EtherscanResponse"}}}}}}},
+
+    "/api?module=proxy&action=eth_chainId": {"get": {"summary": "Get chain ID", "tags": ["Proxy compatibility extension"], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_blockNumber": {"get": {"summary": "Get latest block number", "tags": ["Proxy compatibility extension"], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_getBalance": {"get": {"summary": "Get native balance", "tags": ["Proxy compatibility extension"], "parameters": [{"$ref": "#/components/parameters/Address"}, {"$ref": "#/components/parameters/Tag"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_getTransactionCount": {"get": {"summary": "Get wallet nonce", "description": "Use tag=pending when preparing a new transaction.", "tags": ["Proxy compatibility extension"], "parameters": [{"$ref": "#/components/parameters/Address"}, {"$ref": "#/components/parameters/Tag"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_gasPrice": {"get": {"summary": "Get legacy gas price", "tags": ["Proxy compatibility extension"], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_maxPriorityFeePerGas": {"get": {"summary": "Get EIP-1559 priority fee", "tags": ["Proxy compatibility extension"], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_feeHistory": {"get": {"summary": "Get EIP-1559 fee history", "tags": ["Proxy compatibility extension"], "parameters": [{"name": "blockCount", "in": "query", "schema": {"type": "string", "default": "10"}}, {"name": "newestBlock", "in": "query", "schema": {"type": "string", "default": "latest"}}, {"name": "rewardPercentiles", "in": "query", "schema": {"type": "string", "example": "10,50,90"}}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_estimateGas": {"get": {"summary": "Estimate transaction or deployment gas", "tags": ["Proxy compatibility extension"], "parameters": [{"$ref": "#/components/parameters/From"}, {"$ref": "#/components/parameters/To"}, {"$ref": "#/components/parameters/Data"}, {"$ref": "#/components/parameters/Value"}, {"$ref": "#/components/parameters/Tag"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_call": {"get": {"summary": "Execute a read-only EVM call", "tags": ["Proxy compatibility extension"], "parameters": [{"$ref": "#/components/parameters/From"}, {"$ref": "#/components/parameters/To"}, {"$ref": "#/components/parameters/Data"}, {"$ref": "#/components/parameters/Value"}, {"$ref": "#/components/parameters/Tag"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_getCode": {"get": {"summary": "Get account code", "tags": ["Proxy compatibility extension"], "parameters": [{"$ref": "#/components/parameters/Address"}, {"$ref": "#/components/parameters/Tag"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_getTransactionByHash": {"get": {"summary": "Get transaction by hash", "tags": ["Proxy compatibility extension"], "parameters": [{"$ref": "#/components/parameters/TransactionHash"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_getTransactionReceipt": {"get": {"summary": "Get transaction receipt", "tags": ["Proxy compatibility extension"], "parameters": [{"$ref": "#/components/parameters/TransactionHash"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_getBlockByNumber": {"get": {"summary": "Get block by number or tag", "tags": ["Proxy compatibility extension"], "parameters": [{"$ref": "#/components/parameters/TagRequired"}, {"$ref": "#/components/parameters/FullTransactions"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+    "/api?module=proxy&action=eth_getBlockByHash": {"get": {"summary": "Get block by hash", "tags": ["Proxy compatibility extension"], "parameters": [{"name": "blockhash", "in": "query", "required": true, "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{64}$"}}, {"$ref": "#/components/parameters/FullTransactions"}], "responses": {"200": {"$ref": "#/components/responses/JsonRpc"}}}},
+
+    "/api/health": {"get": {"summary": "Check service and Besu readiness", "tags": ["Infrastructure"], "responses": {"200": {"description": "Ready"}, "502": {"description": "Besu unavailable"}}}},
+    "/api/health/liveness": {"get": {"summary": "Check process liveness", "tags": ["Infrastructure"], "responses": {"200": {"description": "Live"}}}},
+    "/api/health/readiness": {"get": {"summary": "Check Besu readiness", "tags": ["Infrastructure"], "responses": {"200": {"description": "Ready"}, "502": {"description": "Besu unavailable"}}}},
+    "/openapi.json": {"get": {"summary": "Get this OpenAPI document", "tags": ["Documentation"], "responses": {"200": {"description": "OpenAPI document"}}}}
+  },
+  "components": {
+    "parameters": {
+      "Address": {"name": "address", "in": "query", "required": true, "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{40}$"}},
+      "TransactionHash": {"name": "txhash", "in": "query", "required": true, "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{64}$"}},
+      "Tag": {"name": "tag", "in": "query", "schema": {"type": "string", "default": "latest"}},
+      "TagRequired": {"name": "tag", "in": "query", "required": true, "schema": {"type": "string", "example": "latest"}},
+      "FullTransactions": {"name": "boolean", "in": "query", "schema": {"type": "boolean", "default": false}},
+      "From": {"name": "from", "in": "query", "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{40}$"}},
+      "To": {"name": "to", "in": "query", "schema": {"type": "string", "pattern": "^0x[0-9a-fA-F]{40}$"}},
+      "Data": {"name": "data", "in": "query", "required": true, "schema": {"type": "string", "pattern": "^0x(?:[0-9a-fA-F]{2})*$"}},
+      "Value": {"name": "value", "in": "query", "schema": {"type": "string", "default": "0x0"}}
+    },
+    "responses": {
+      "JsonRpc": {"description": "Ethereum JSON-RPC-shaped response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JsonRpcResponse"}}}}
+    },
+    "schemas": {
+      "JsonRpcResponse": {"oneOf": [{"$ref": "#/components/schemas/JsonRpcSuccess"}, {"$ref": "#/components/schemas/JsonRpcError"}]},
+      "JsonRpcSuccess": {"type": "object", "additionalProperties": false, "required": ["jsonrpc", "id", "result"], "properties": {"jsonrpc": {"type": "string", "enum": ["2.0"]}, "id": {"type": "integer", "enum": [1]}, "result": {"nullable": true}}},
+      "JsonRpcError": {"type": "object", "additionalProperties": false, "required": ["jsonrpc", "id", "error"], "properties": {"jsonrpc": {"type": "string", "enum": ["2.0"]}, "id": {"type": "integer", "enum": [1]}, "error": {"type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": {"code": {"type": "integer"}, "message": {"type": "string"}}}}},
+      "EtherscanResponse": {"type": "object", "additionalProperties": false, "required": ["status", "message", "result"], "properties": {"status": {"type": "string", "enum": ["0", "1"]}, "message": {"type": "string", "enum": ["OK", "NOTOK"]}, "result": {"nullable": true}}},
+      "EtherscanStringResponse": {"allOf": [{"$ref": "#/components/schemas/EtherscanResponse"}, {"type": "object", "properties": {"result": {"type": "string"}}}]}
+    }
+  }
+}
