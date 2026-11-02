@@ -21,15 +21,27 @@ final class ProxyServer {
     private final HttpServer server;
     private final BesuClient client;
     private final SqliteStore store;
+    private final InternalUiService internalUi;
 
     ProxyServer(InetSocketAddress address, BesuClient client) throws IOException {
         this(address, client, null);
     }
 
     ProxyServer(InetSocketAddress address, BesuClient client, SqliteStore store) throws IOException {
+        this(
+                address,
+                client,
+                store,
+                new InternalUiService(NodeRegistry.single("primary", client.endpoint(), client)));
+    }
+
+    ProxyServer(
+            InetSocketAddress address, BesuClient client, SqliteStore store, InternalUiService internalUi)
+            throws IOException {
         this.server = HttpServer.create(address, 0);
         this.client = client;
         this.store = store;
+        this.internalUi = internalUi;
         server.createContext("/", this::handle);
     }
 
@@ -80,6 +92,10 @@ final class ProxyServer {
             etherscanApi(exchange);
             return;
         }
+        if (path.startsWith("/internal/ui/")) {
+            internalUiApi(exchange, path);
+            return;
+        }
         if ("POST".equals(method)) {
             sendJson(exchange, 405, Map.of("message", "POST is only supported by /api"));
             return;
@@ -109,6 +125,29 @@ final class ProxyServer {
         }
     }
 
+    private void internalUiApi(HttpExchange exchange, String path) throws IOException, InterruptedException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("message", "Internal UI endpoints only support GET"));
+            return;
+        }
+        Map<String, String> params = parseQuery(exchange.getRequestURI().getRawQuery());
+        Object response = switch (path) {
+            case "/internal/ui/config" -> internalUi.configuration();
+            case "/internal/ui/explorer" -> internalUi.explorer(
+                    params.get("node"),
+                    positiveParameter(params, "lookback", 5, 30),
+                    positiveParameter(params, "transactionLimit", 20, 20));
+            case "/internal/ui/nodes/status" -> internalUi.nodeStatus(params.get("node"));
+            case "/internal/ui/validators" -> internalUi.validators(params.get("node"));
+            default -> null;
+        };
+        if (response == null) {
+            sendJson(exchange, 404, Map.of("message", "Internal UI endpoint not supported"));
+        } else {
+            sendJson(exchange, 200, response);
+        }
+    }
+
     private void etherscanApi(HttpExchange exchange) throws IOException, InterruptedException {
         Map<String, String> params = apiParameters(exchange);
         String module = params.get("module");
@@ -121,6 +160,7 @@ final class ProxyServer {
             Object response = switch (module.toLowerCase() + ":" + action.toLowerCase()) {
                 case "account:balance" -> accountBalance(params);
                 case "account:balancemulti" -> accountBalanceMulti(params);
+                case "account:txlist" -> accountTransactionList(params);
                 case "account:eth_get_balance" -> jsonRpcResult(client.call(
                         "eth_getBalance",
                         List.of(
@@ -190,6 +230,43 @@ final class ProxyServer {
                     "stale", false));
         }
         return etherscanSuccess(results);
+    }
+
+    private Object accountTransactionList(Map<String, String> params) throws InterruptedException {
+        if (store == null) {
+            throw new IllegalArgumentException("The SQLite transaction index is not configured");
+        }
+        String address = requiredAddress(params).toLowerCase();
+        String chainId = requireString(client.call("eth_chainId", List.of()), "chain id").toLowerCase();
+        if (!store.indexedContract(chainId, address)) {
+            throw new IllegalArgumentException("Address is not configured for contract transaction indexing");
+        }
+        long latestBlock = new BigInteger(
+                        requireQuantity(client.call("eth_blockNumber", List.of()), "eth_blockNumber").substring(2),
+                        16)
+                .longValueExact();
+        long fromBlock = logBlock(params.getOrDefault("startblock", "0"), false);
+        long toBlock = logBlock(params.getOrDefault("endblock", "latest"), true);
+        if (fromBlock > toBlock) {
+            throw new IllegalArgumentException("startblock must not be greater than endblock");
+        }
+        int page = positiveParameter(params, "page", 1, 1_000_000);
+        int offset = positiveParameter(params, "offset", 25, 1_000);
+        String sort = params.getOrDefault("sort", "desc").toLowerCase();
+        if (!List.of("asc", "desc").contains(sort)) {
+            throw new IllegalArgumentException("sort must be asc or desc");
+        }
+        List<Map<String, Object>> transactions = store.findContractTransactions(
+                new SqliteStore.ContractTransactionQuery(
+                        chainId,
+                        address,
+                        fromBlock,
+                        toBlock,
+                        sort.equals("asc"),
+                        page,
+                        offset,
+                        latestBlock));
+        return transactions.isEmpty() ? etherscanError("No transactions found") : etherscanSuccess(transactions);
     }
 
     private Object proxyFeeHistory(Map<String, String> params) throws InterruptedException {

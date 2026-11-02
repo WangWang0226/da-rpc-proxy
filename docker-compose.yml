@@ -1,10 +1,12 @@
 services:
   api:
+    image: besu-rpc-proxy:local
     build: .
     environment:
       SERVICE_MODE: api
       HTTP_HOST: 0.0.0.0
       BESU_RPC_URL: ${BESU_RPC_URL:-http://host.docker.internal:8545}
+      BESU_RPC_TIMEOUT_MS: ${BESU_RPC_TIMEOUT_MS:-5000}
       SQLITE_PATH: /data/indexer.sqlite
     ports:
       - "8080:8080"
@@ -15,15 +17,20 @@ services:
     restart: unless-stopped
 
   indexer:
+    image: besu-rpc-proxy:local
     build: .
     environment:
       SERVICE_MODE: indexer
       BESU_RPC_URL: ${BESU_RPC_URL:-http://host.docker.internal:8545}
+      BESU_RPC_TIMEOUT_MS: ${BESU_RPC_TIMEOUT_MS:-5000}
       SQLITE_PATH: /data/indexer.sqlite
       INDEXER_CONTRACT_ADDRESSES: ${INDEXER_CONTRACT_ADDRESSES:?set contract addresses}
       INDEXER_TOPIC0: ${INDEXER_TOPIC0:-}
       INDEXER_START_BLOCK: ${INDEXER_START_BLOCK:-}
       INDEXER_CONFIRMATIONS: ${INDEXER_CONFIRMATIONS:-0}
+      INDEXER_BATCH_SIZE: ${INDEXER_BATCH_SIZE:-500}
+      INDEXER_POLL_INTERVAL_MS: ${INDEXER_POLL_INTERVAL_MS:-2000}
+      INDEXER_REORG_LOOKBACK: ${INDEXER_REORG_LOOKBACK:-128}
     volumes:
       - indexer-data:/data
     extra_hosts:

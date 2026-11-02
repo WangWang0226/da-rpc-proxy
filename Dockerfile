@@ -1,9 +1,10 @@
+# syntax=docker/dockerfile:1
 FROM eclipse-temurin:21-jdk-jammy AS build
 WORKDIR /workspace
 COPY gradle gradle
 COPY gradlew build.gradle.kts settings.gradle.kts ./
 COPY src src
-RUN ./gradlew --no-daemon installDist
+RUN --mount=type=cache,target=/root/.gradle ./gradlew --no-daemon installDist
 
 FROM eclipse-temurin:21-jre-jammy
 RUN useradd --system --uid 10001 --create-home app

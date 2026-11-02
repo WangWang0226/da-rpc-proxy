@@ -8,8 +8,9 @@ GET or POST /api?module=<module>&action=<action>&...
 ```
 
 Every action is resolved through an explicit allowlist and a bounded set of
-Besu JSON-RPC calls. Contract logs are handled by the small SQLite indexer;
-there is no arbitrary method pass-through, PostgreSQL, or Redis.
+Besu JSON-RPC calls. Allowlisted contract logs and top-level transactions are
+handled by the small SQLite indexer; there is no arbitrary method pass-through,
+PostgreSQL, or Redis.
 
 ## Documentation and test clients
 
@@ -25,8 +26,8 @@ there is no arbitrary method pass-through, PostgreSQL, or Redis.
 These names and response envelopes match Blockscout's documented per-instance
 RPC API.
 
-This service now implements 7 of Blockscout's 42 documented per-instance
-module/action operations (16.7%). The percentage is intentionally small
+This service now implements 8 of Blockscout's 42 documented per-instance
+module/action operations (19.0%). The percentage is intentionally small
 because account history, tokens, stats, contract verification, and other
 full-explorer features remain outside this lightweight service.
 
@@ -35,6 +36,7 @@ full-explorer features remain outside this lightweight service.
 | `account` | `balance` | `eth_getBalance` | `{status,message,result}` with decimal wei |
 | `account` | `balancemulti` | Up to 20 `eth_getBalance` calls | `{status,message,result[]}` |
 | `account` | `eth_get_balance` | `eth_getBalance` | `{jsonrpc,id,result}` with hex wei |
+| `account` | `txlist` | SQLite allowlisted contract transaction index | `{status,message,result[]}`; arbitrary accounts rejected |
 | `block` | `eth_block_number` | `eth_blockNumber` | `{jsonrpc,id,result}` |
 | `transaction` | `gettxreceiptstatus` | `eth_getTransactionReceipt` | `{status,message,result:{status}}` |
 | `transaction` | `getstatus` | `eth_getTransactionReceipt` | `{status,message,result:{isError,errDescription}}` |
@@ -74,8 +76,8 @@ module/action transport. Successful responses use the Ethereum JSON-RPC-shaped
 | `/api/health/readiness` | Besu `eth_chainId` and `eth_blockNumber` check |
 | `/openapi.json` | Machine-readable API contract |
 
-The OpenAPI document and Postman Collection each contain all 26 documented
-operations: 7 official compatible actions, 14 proxy extensions, 1 local
+The OpenAPI document and Postman Collection each contain all 27 documented
+operations: 8 official compatible actions, 14 proxy extensions, 1 local
 index-discovery extension, 3 health checks, and the OpenAPI endpoint.
 
 ## Lightweight indexer boundary
@@ -92,11 +94,17 @@ are actually available. It is not claimed as an official Blockscout action.
 | --- | --- | --- |
 | `logs` | `getIndexedContracts` | Contract address, optional `topic0`, start block, and latest indexed block |
 
+`account.txlist` uses the same configured contract allowlist. It stores only
+top-level transactions whose `to` address is configured, plus matching contract
+creation transactions. Receipts provide status, created address, gas used, and
+effective gas price. It does not include internal contract calls or unrelated
+wallet history.
+
 ## Deliberately unsupported
 
 | Module/action family | Reason |
 | --- | --- |
-| `account.txlist`, token transfers, internal transactions | Requires historical address indexes |
+| Arbitrary account `txlist`, token transfers, internal transactions | Requires broader address indexes or execution traces |
 | Token lists, holders, and historical balances | Requires event ingestion and token-state indexing |
 | Arbitrary unconfigured logs and OR topic operators | Outside the bounded index configuration |
 | Contract ABI/source and verification | Source metadata is not EVM state |
@@ -106,3 +114,12 @@ are actually available. It is not claimed as an official Blockscout action.
 Unsupported module/action combinations return HTTP 200 with the Etherscan
 error envelope `{status:"0",message:"NOTOK",result:"Unsupported module/action"}`.
 Old `/api/v2/...` blockchain routes return HTTP 404.
+
+## Internal UI routes
+
+`/internal/ui/config`, `/internal/ui/explorer`, `/internal/ui/nodes/status`, and
+`/internal/ui/validators` support the private browser UI. They aggregate live
+Besu state, are not Blockscout/Etherscan-compatible customer endpoints, and are
+therefore deliberately excluded from the support percentage, OpenAPI document,
+and Postman collection. They must not be presented to Fireblocks as public API
+contract surface.

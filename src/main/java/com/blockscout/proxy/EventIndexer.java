@@ -81,7 +81,7 @@ final class EventIndexer implements AutoCloseable {
             return checkpoint;
         }
         long lastNumber = checkpoint.nextBlock() - 1;
-        Map<String, Object> canonical = block(lastNumber);
+        Map<String, Object> canonical = block(lastNumber, false);
         if (checkpoint.lastBlockHash().equalsIgnoreCase(stringField(canonical, "hash"))) {
             return checkpoint;
         }
@@ -90,7 +90,7 @@ final class EventIndexer implements AutoCloseable {
         while (commonAncestor > minimum) {
             String storedHash = store.blockHash(chainId, commonAncestor);
             if (storedHash != null
-                    && storedHash.equalsIgnoreCase(stringField(block(commonAncestor), "hash"))) {
+                    && storedHash.equalsIgnoreCase(stringField(block(commonAncestor, false), "hash"))) {
                 break;
             }
             commonAncestor--;
@@ -105,13 +105,15 @@ final class EventIndexer implements AutoCloseable {
 
     private void indexRange(long fromBlock, long toBlock) throws InterruptedException {
         List<SqliteStore.IndexedBlock> blocks = new ArrayList<>();
+        List<SqliteStore.IndexedTransaction> transactions = new ArrayList<>();
         Map<Long, Long> timestamps = new HashMap<>();
         for (long number = fromBlock; number <= toBlock; number++) {
-            Map<String, Object> block = block(number);
+            Map<String, Object> block = block(number, true);
             long timestamp = quantity(block.get("timestamp"), "block timestamp");
             blocks.add(new SqliteStore.IndexedBlock(
                     number, stringField(block, "hash"), stringField(block, "parentHash"), timestamp));
             timestamps.put(number, timestamp);
+            transactions.addAll(indexedTransactions(block, number, timestamp));
         }
 
         Map<String, Object> filter = new LinkedHashMap<>();
@@ -147,16 +149,106 @@ final class EventIndexer implements AutoCloseable {
                     stringField(log, "data"),
                     timestamps.getOrDefault(blockNumber, 0L)));
         }
-        store.persistBatch(chainId, blocks, indexedLogs);
-        System.out.printf("Indexed blocks %d-%d and %d logs%n", fromBlock, toBlock, indexedLogs.size());
+        store.persistBatch(chainId, blocks, indexedLogs, transactions);
+        System.out.printf(
+                "Indexed blocks %d-%d, %d logs, and %d contract transactions%n",
+                fromBlock,
+                toBlock,
+                indexedLogs.size(),
+                transactions.size());
     }
 
-    private Map<String, Object> block(long number) throws InterruptedException {
-        Object value = client.call("eth_getBlockByNumber", List.of(hex(number), false));
+    private List<SqliteStore.IndexedTransaction> indexedTransactions(
+            Map<String, Object> block, long blockNumber, long timestamp) throws InterruptedException {
+        Object rawTransactions = block.get("transactions");
+        if (!(rawTransactions instanceof List<?> values)) {
+            throw new BesuClient.UpstreamException("Besu returned invalid block transactions", 502);
+        }
+        List<SqliteStore.IndexedTransaction> transactions = new ArrayList<>();
+        for (Object value : values) {
+            if (!(value instanceof Map<?, ?> rawTransaction)) {
+                throw new BesuClient.UpstreamException("Besu did not return full block transactions", 502);
+            }
+            Map<String, Object> transaction = BesuClient.castObject(rawTransaction);
+            String to = optionalString(transaction.get("to"));
+            String from = stringField(transaction, "from").toLowerCase();
+            String matchedAddress = configuredAddress(to);
+            if (matchedAddress == null) {
+                matchedAddress = configuredAddress(from);
+            }
+
+            Map<String, Object> receipt = null;
+            String createdContract = null;
+            if (matchedAddress != null || to == null) {
+                receipt = receipt(stringField(transaction, "hash"));
+                createdContract = optionalString(receipt.get("contractAddress"));
+                if (matchedAddress == null) {
+                    matchedAddress = configuredAddress(createdContract);
+                }
+            }
+            if (matchedAddress == null) {
+                continue;
+            }
+            if (receipt == null) {
+                receipt = receipt(stringField(transaction, "hash"));
+                createdContract = optionalString(receipt.get("contractAddress"));
+            }
+            transactions.add(new SqliteStore.IndexedTransaction(
+                    matchedAddress,
+                    stringField(transaction, "hash").toLowerCase(),
+                    blockNumber,
+                    stringField(block, "hash").toLowerCase(),
+                    timestamp,
+                    quantity(transaction.get("transactionIndex"), "transaction index"),
+                    from,
+                    to == null ? null : to.toLowerCase(),
+                    createdContract == null ? null : createdContract.toLowerCase(),
+                    quantityString(transaction, "nonce", "0x0"),
+                    quantityString(transaction, "value", "0x0"),
+                    quantityString(transaction, "gas", "0x0"),
+                    optionalString(transaction.get("gasPrice")),
+                    optionalString(transaction.get("maxFeePerGas")),
+                    optionalString(transaction.get("maxPriorityFeePerGas")),
+                    stringField(transaction, "input"),
+                    quantityString(transaction, "type", "0x0"),
+                    optionalString(receipt.get("status")),
+                    optionalString(receipt.get("gasUsed")),
+                    optionalString(receipt.get("effectiveGasPrice"))));
+        }
+        return transactions;
+    }
+
+    private String configuredAddress(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.toLowerCase();
+        return configuration.addresses().contains(normalized) ? normalized : null;
+    }
+
+    private Map<String, Object> receipt(String hash) throws InterruptedException {
+        Object value = client.call("eth_getTransactionReceipt", List.of(hash));
+        if (!(value instanceof Map<?, ?> raw)) {
+            throw new BesuClient.UpstreamException("Besu returned no receipt for " + hash, 502);
+        }
+        return BesuClient.castObject(raw);
+    }
+
+    private Map<String, Object> block(long number, boolean fullTransactions) throws InterruptedException {
+        Object value = client.call("eth_getBlockByNumber", List.of(hex(number), fullTransactions));
         if (!(value instanceof Map<?, ?> raw)) {
             throw new BesuClient.UpstreamException("Besu returned no block for " + number, 502);
         }
         return BesuClient.castObject(raw);
+    }
+
+    private static String quantityString(Map<String, Object> object, String field, String defaultValue) {
+        String value = optionalString(object.get(field));
+        return value == null ? defaultValue : value;
+    }
+
+    private static String optionalString(Object value) {
+        return value instanceof String string && !string.isBlank() ? string : null;
     }
 
     private static List<String> topics(Object value) {

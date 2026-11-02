@@ -3,195 +3,130 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Besu Explorer</title>
+    <title>Besu Operations Explorer</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <header>
-      <div>
-        <p class="eyebrow">Blockscout / Etherscan compatible API</p>
-        <h1>Private Besu Explorer</h1>
-        <p class="subtitle">Read live chain state and indexed contract events without PostgreSQL or Redis.</p>
-      </div>
-      <nav class="header-links">
-        <a class="docs" href="/swagger">Swagger</a>
-        <a class="docs" href="/postman/besu-etherscan-compatible.postman_collection.json" download>Postman</a>
+    <header class="topbar">
+      <a class="brand" href="#explorer" data-page-target="explorer" aria-label="Besu Explorer home">
+        <span class="brand-mark">B</span>
+        <span><strong>Besu Explorer</strong><small>Private network operations</small></span>
+      </a>
+      <nav class="nav" aria-label="Primary navigation">
+        <a href="#explorer" data-page-target="explorer">Explorer</a>
+        <a href="#nodes" data-page-target="nodes">Nodes</a>
+        <a href="#validators" data-page-target="validators">Validators</a>
+        <a href="#contracts" data-page-target="contracts">Contracts</a>
+        <a href="#api-console" data-page-target="api-console">API Console</a>
       </nav>
+      <div class="network-control">
+        <span id="connection-dot" class="connection-dot"></span>
+        <label for="node-select">Node</label>
+        <select id="node-select" aria-label="Besu node"></select>
+      </div>
     </header>
 
-    <main>
-      <section class="panel network-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Network</p>
-            <h2>Current head</h2>
+    <main class="app-shell">
+      <section class="page active" data-page="explorer">
+        <div class="page-heading">
+          <div><p class="eyebrow">Network overview</p><h1>Explorer</h1><p>Live blocks and transactions fetched directly from Besu.</p></div>
+          <div class="toolbar">
+            <label for="lookback">Lookback</label>
+            <select id="lookback"><option value="5" selected>5 blocks</option><option value="10">10 blocks</option><option value="20">20 blocks</option><option value="30">30 blocks</option></select>
+            <button id="toggle-refresh" class="secondary" type="button">Pause auto-refresh</button>
+            <button id="refresh-explorer" type="button">Refresh</button>
           </div>
-          <button id="refresh-network" type="button">Refresh</button>
         </div>
-        <div id="network-summary" class="summary-grid" aria-live="polite"></div>
+        <div id="explorer-alert" class="alert hidden" role="alert"></div>
+        <div class="summary-grid">
+          <article class="metric"><span>Chain ID</span><strong id="chain-id">—</strong><small>Signing domain</small></article>
+          <article class="metric"><span>Latest block</span><strong id="latest-block">—</strong><small>Current Besu head</small></article>
+          <article class="metric"><span>Selected node</span><strong id="selected-node">—</strong><small>Configured server target</small></article>
+          <article class="metric"><span>Last updated</span><strong id="last-updated">—</strong><small>Refreshes every 15 seconds</small></article>
+        </div>
+        <div class="lookup-bar">
+          <form id="block-search"><label for="block-query">Block</label><input id="block-query" placeholder="Number, latest, or block hash" required><button type="submit">Search</button></form>
+          <form id="transaction-search"><label for="transaction-query">Transaction</label><input id="transaction-query" placeholder="0x transaction hash" required><button type="submit">Search</button></form>
+        </div>
+        <section class="card">
+          <div class="card-heading"><div><h2>Latest blocks</h2><p>Most recent blocks within the selected lookback.</p></div><span id="block-count" class="pill">0 blocks</span></div>
+          <div class="table-wrap"><table><thead><tr><th>Block</th><th>Age</th><th>Transactions</th><th>Validator</th><th>Gas used</th></tr></thead><tbody id="blocks-table"></tbody></table></div>
+        </section>
+        <section class="card">
+          <div class="card-heading"><div><h2>Latest transactions</h2><p>Up to 20 transactions collected from the selected blocks.</p></div><span id="transaction-count" class="pill">0 transactions</span></div>
+          <div class="table-wrap"><table><thead><tr><th>Transaction hash</th><th>Block</th><th>From</th><th>To / contract</th><th>Status</th><th>Gas used</th></tr></thead><tbody id="transactions-table"></tbody></table></div>
+        </section>
       </section>
 
-      <section class="panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">SQLite event index</p>
-            <h2>Indexed contracts</h2>
-            <p class="section-help">These are the contract and topic filters currently persisted by the indexer. Select one to search its events.</p>
-          </div>
-          <button id="refresh-indexed-contracts" type="button">Refresh</button>
+      <section class="page" data-page="nodes">
+        <div class="page-heading"><div><p class="eyebrow">Internal operations</p><h1>Nodes</h1><p>Read-only Besu node, peer, and transaction-pool status.</p></div><button id="refresh-nodes" type="button">Refresh node</button></div>
+        <div id="nodes-alert" class="alert hidden" role="alert"></div>
+        <div class="summary-grid">
+          <article class="metric"><span>Connection</span><strong id="node-connection">—</strong><small>JSON-RPC health</small></article>
+          <article class="metric"><span>Block height</span><strong id="node-height">—</strong><small>Reported by selected node</small></article>
+          <article class="metric"><span>Peer count</span><strong id="node-peer-count">—</strong><small>Requires NET API</small></article>
+          <article class="metric"><span>Tx pool</span><strong id="node-txpool-count">—</strong><small>Requires TXPOOL API</small></article>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Contract</th><th>Topic 0</th><th>Indexed range</th><th></th></tr>
-            </thead>
-            <tbody id="indexed-contracts"></tbody>
-          </table>
+        <div class="two-column">
+          <section class="card"><div class="card-heading"><div><h2>Node information</h2><p>Requires the Besu ADMIN API.</p></div></div><dl id="node-info" class="detail-list"></dl></section>
+          <section class="card"><div class="card-heading"><div><h2>Peers</h2><p>Current peer records from <code>admin_peers</code>.</p></div><span id="peer-count" class="pill">0 peers</span></div><div id="peers-list" class="stack-list"></div></section>
         </div>
       </section>
 
-      <section class="lookup-grid">
-        <article class="panel">
-          <p class="eyebrow">Block lookup</p>
-          <h2>Block</h2>
-          <form data-endpoint="blocks">
-            <label for="block-id">Number, tag, or hash</label>
-            <div class="input-row">
-              <input id="block-id" name="value" placeholder="latest or 123" required>
-              <button type="submit">Fetch</button>
-            </div>
+      <section class="page" data-page="validators">
+        <div class="page-heading"><div><p class="eyebrow">QBFT consensus</p><h1>Validators</h1><p>Read-only validator membership and pending vote visibility.</p></div><button id="refresh-validators" type="button">Refresh validators</button></div>
+        <div id="validators-alert" class="alert hidden" role="alert"></div>
+        <section class="card"><div class="card-heading"><div><h2>Active validators</h2><p>From <code>qbft_getValidatorsByBlockNumber("latest")</code>.</p></div><span id="validator-count" class="pill">0 validators</span></div><div id="validators-list" class="address-grid"></div></section>
+        <section class="card"><div class="card-heading"><div><h2>Pending votes</h2><p>Informational only. This explorer does not add or discard votes.</p></div></div><pre id="pending-votes">No data loaded.</pre></section>
+      </section>
+
+      <section class="page" data-page="contracts">
+        <div class="page-heading"><div><p class="eyebrow">SQLite event index</p><h1>Contracts</h1><p>Browse configured contract indexes and query their persisted events.</p></div><button id="refresh-contracts" type="button">Refresh indexes</button></div>
+        <div id="contracts-alert" class="alert hidden" role="alert"></div>
+        <section class="card"><div class="card-heading"><div><h2>Indexed contracts</h2><p>Only these configured address/topic combinations can be queried.</p></div></div><div class="table-wrap"><table><thead><tr><th>Contract</th><th>Topic 0</th><th>Start block</th><th>Latest indexed</th><th>Transactions</th><th></th></tr></thead><tbody id="contracts-table"></tbody></table></div></section>
+        <section class="card">
+          <div class="card-heading"><div><h2>Event search</h2><p>Search the bounded SQLite index; no live historical scan is performed.</p></div></div>
+          <form id="event-search" class="form-grid">
+            <label>Contract address<input name="address" placeholder="0x…" required></label>
+            <label>Topic 0 (optional)<input name="topic0" placeholder="0x…"></label>
+            <label>From block<input name="fromBlock" value="0" required></label>
+            <label>To block<input name="toBlock" value="latest" required></label>
+            <button type="submit">Search events</button>
           </form>
-        </article>
-
-        <article class="panel">
-          <p class="eyebrow">Transaction lookup</p>
-          <h2>Transaction</h2>
-          <form data-endpoint="transactions">
-            <label for="transaction-id">Transaction hash</label>
-            <div class="input-row">
-              <input id="transaction-id" name="value" placeholder="0x…" required>
-              <button type="submit">Fetch</button>
-            </div>
+          <div class="table-wrap"><table><thead><tr><th>Block</th><th>Transaction</th><th>Log index</th><th>Topic 0</th><th></th></tr></thead><tbody id="events-table"></tbody></table></div>
+        </section>
+        <section class="card">
+          <div class="card-heading"><div><h2>Contract transaction history</h2><p>Top-level transactions indexed only for configured contract addresses.</p></div><span id="contract-transaction-count" class="pill">0 transactions</span></div>
+          <form id="contract-transactions-search" class="form-grid transaction-search-grid">
+            <label>Contract address<input name="address" placeholder="0x…" required></label>
+            <label>From block<input name="startblock" value="0" required></label>
+            <label>To block<input name="endblock" value="latest" required></label>
+            <label>Sort<select name="sort"><option value="desc">Newest first</option><option value="asc">Oldest first</option></select></label>
+            <button type="submit">Search transactions</button>
           </form>
-        </article>
-
-        <article class="panel">
-          <p class="eyebrow">Address lookup</p>
-          <h2>Address</h2>
-          <form data-endpoint="addresses">
-            <label for="address-id">Wallet or contract address</label>
-            <div class="input-row">
-              <input id="address-id" name="value" placeholder="0x…" required>
-              <button type="submit">Fetch</button>
-            </div>
-          </form>
-        </article>
-
-        <article class="panel">
-          <p class="eyebrow">Indexed event lookup</p>
-          <h2>Contract logs</h2>
-          <form id="logs-form">
-            <label for="logs-address">Contract address</label>
-            <input id="logs-address" name="address" placeholder="0x…" spellcheck="false" required>
-            <label for="logs-topic0">Topic 0 (optional event signature)</label>
-            <input id="logs-topic0" name="topic0" placeholder="0x…" spellcheck="false">
-            <div class="input-row">
-              <input name="fromBlock" value="0" aria-label="From block" required>
-              <button type="submit">Fetch logs</button>
-            </div>
-          </form>
-        </article>
+          <div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Block</th><th>Age</th><th>From</th><th>To / created contract</th><th>Status</th><th>Gas used</th><th></th></tr></thead><tbody id="contract-transactions-table"></tbody></table></div>
+        </section>
       </section>
 
-      <section class="panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Deployment preparation</p>
-            <h2>Transaction RPC API</h2>
-            <p class="section-help">Use these checks before creating a contract deployment transaction. Results appear immediately on the right.</p>
-          </div>
+      <section class="page" data-page="api-console">
+        <div class="page-heading"><div><p class="eyebrow">Developer tools</p><h1>API Console</h1><p>Choose any supported endpoint, edit its parameters, and inspect the exact request and live response.</p></div><div class="actions"><a class="button secondary" href="/swagger">Swagger</a><a class="button secondary" href="/postman/besu-etherscan-compatible.postman_collection.json" download>Postman</a></div></div>
+        <div class="console-layout">
+          <aside class="card console-picker"><label for="console-endpoint">API endpoint</label><select id="console-endpoint"></select><div id="console-description" class="console-description"></div></aside>
+          <section class="card console-request">
+            <div class="card-heading"><div><h2>Request</h2><p>All calls stay within the server's explicit module/action allowlist.</p></div><span class="method-pill">GET</span></div>
+            <form id="console-form"><div id="console-fields" class="console-fields"></div><button type="submit">Send request</button></form>
+            <label class="request-url-label" for="console-url">Request URL</label><code id="console-url" class="request-url"></code>
+          </section>
+          <section class="card console-response">
+            <div class="card-heading"><div><h2>Response</h2><p id="console-response-meta">No request sent.</p></div><span id="console-response-status" class="pill">Waiting</span></div>
+            <pre id="console-response-body">Select an endpoint and send a request.</pre>
+          </section>
         </div>
-        <div class="deployment-layout">
-          <div class="deployment-controls">
-            <div class="tool-group">
-              <div class="step-heading"><span>1</span><div><h3>Check network fees</h3><p>No input required. Click any value to query Besu now.</p></div></div>
-              <div class="rpc-actions">
-                <button type="button" data-get="/api?module=proxy&amp;action=eth_chainId">Chain ID</button>
-                <button type="button" data-get="/api?module=block&amp;action=eth_block_number">Latest block</button>
-                <button type="button" data-get="/api?module=proxy&amp;action=eth_gasPrice">Legacy gas price</button>
-                <button type="button" data-get="/api?module=proxy&amp;action=eth_maxPriorityFeePerGas">Priority fee</button>
-                <button type="button" data-get="/api?module=proxy&amp;action=eth_feeHistory&amp;blockCount=10&amp;newestBlock=latest&amp;rewardPercentiles=10,50,90">EIP-1559 fee history</button>
-              </div>
-            </div>
-
-            <form id="nonce-form" class="tool-group">
-              <div class="step-heading"><span>2</span><div><h3>Get sender nonce</h3><p>Enter the Fireblocks wallet address. The pending nonce includes queued transactions.</p></div></div>
-              <label for="nonce-address">Wallet address</label>
-              <div class="input-row">
-                <input id="nonce-address" name="address" placeholder="0x… (40 hex characters)" spellcheck="false" required>
-                <button type="submit">Get pending nonce</button>
-              </div>
-            </form>
-
-            <form id="estimate-form" class="tool-group">
-              <div class="step-heading"><span>3</span><div><h3>Estimate or simulate deployment</h3><p>Paste the compiled contract creation bytecode. Constructor arguments must already be appended.</p></div></div>
-              <label for="deployment-from">Sender wallet address</label>
-              <input id="deployment-from" name="from" placeholder="0x… (Fireblocks wallet)" spellcheck="false" required>
-              <label for="deployment-data">Contract creation bytecode</label>
-              <textarea id="deployment-data" name="data" rows="6" placeholder="0x60806040…" spellcheck="false" required></textarea>
-              <label for="deployment-value">Native value in hex wei</label>
-              <input id="deployment-value" name="value" value="0x0" spellcheck="false" required>
-              <div class="rpc-actions">
-                <button type="submit">Estimate gas</button>
-                <button id="simulate-call" type="button">Simulate call</button>
-              </div>
-            </form>
-          </div>
-
-          <aside class="rpc-result" aria-live="polite">
-            <div class="result-heading">
-              <div>
-                <p class="eyebrow">Live result</p>
-                <h3 id="rpc-response-title">Choose an action</h3>
-              </div>
-              <span id="rpc-response-status" class="status">Waiting</span>
-            </div>
-            <code id="rpc-response-endpoint">No endpoint called yet</code>
-            <pre id="rpc-response-output">Click a network check, enter a wallet address, or estimate a deployment.</pre>
-          </aside>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Recent blocks</p>
-            <h2>Latest activity</h2>
-          </div>
-          <button id="refresh-blocks" type="button">Refresh</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Height</th><th>Timestamp</th><th>Transactions</th><th>Gas used</th></tr>
-            </thead>
-            <tbody id="recent-blocks"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel response-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">API response</p>
-            <h2 id="response-title">Select a lookup</h2>
-          </div>
-          <span id="response-status" class="status"></span>
-        </div>
-        <pre id="response-output">No request sent yet.</pre>
       </section>
     </main>
 
+    <dialog id="detail-dialog"><div class="dialog-heading"><div><p class="eyebrow" id="detail-type">Details</p><h2 id="detail-title">Result</h2></div><button id="close-dialog" class="icon-button" type="button" aria-label="Close">×</button></div><pre id="detail-content"></pre></dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="/app.js" defer></script>
   </body>
 </html>

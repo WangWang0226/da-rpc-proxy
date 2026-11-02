@@ -10,8 +10,8 @@ PostgreSQL, or Redis.
 The system has two data-access paths:
 
 - Current chain state is read directly from Besu JSON-RPC.
-- Allowlisted contract event logs are indexed into SQLite and queried through
-  `logs.getLogs`.
+- Allowlisted contract event logs and top-level contract transactions are
+  indexed into SQLite and queried through `logs.getLogs` and `account.txlist`.
 
 It does not attempt to provide a complete blockchain explorer index.
 
@@ -27,11 +27,11 @@ flowchart LR
     DB[(SQLite WAL database)]
 
     FB -->|module/action HTTP API| API
-    UI -->|same-origin HTTP API| API
+    UI -->|internal UI aggregation| API
     API -->|live state JSON-RPC| BESU
-    IDX -->|blocks and eth_getLogs| BESU
+    IDX -->|blocks, receipts, and eth_getLogs| BESU
     IDX -->|single writer| DB
-    API -->|read indexed events| DB
+    API -->|read indexed events and transactions| DB
 ```
 
 The API and indexer use the same application image. `SERVICE_MODE` selects
@@ -62,11 +62,33 @@ The API service uses the JDK HTTP server and exposes:
 - SQLite-backed `logs.getLogs`
 - Local index discovery through `logs.getIndexedContracts`
 - Explorer static assets
+- Internal Explorer, Nodes, and read-only QBFT Validator aggregation routes
 - Swagger/OpenAPI and a downloadable Postman collection
 - Liveness and Besu readiness endpoints
 
 The Besu endpoint is server configuration. A caller cannot supply or override
 the upstream RPC URL.
+
+### Internal UI data path
+
+The static UI does not call arbitrary JSON-RPC. It calls four undocumented,
+same-origin routes under `/internal/ui/*`. These routes are excluded from the
+Fireblocks OpenAPI and Postman contracts:
+
+| Route | Purpose | Besu methods |
+| --- | --- | --- |
+| `/internal/ui/config` | Server-defined node choices | none |
+| `/internal/ui/explorer` | Recent block/transaction aggregation | `eth_chainId`, `eth_blockNumber`, `eth_getBlockByNumber`, displayed transactions' `eth_getTransactionReceipt` |
+| `/internal/ui/nodes/status` | Node operations view | `eth_blockNumber`, optional `admin_nodeInfo`, `net_peerCount`, `txpool_besuTransactions`, `admin_peers` |
+| `/internal/ui/validators` | QBFT read-only view | `qbft_getValidatorsByBlockNumber`, optional `qbft_getPendingVotes` |
+
+Explorer responses are cached in JVM memory for five seconds to avoid duplicate
+browser refresh calls. The cache is disposable and is not an index or a source
+of truth. Nodes and Validators are fetched live.
+
+`BESU_NODES_CONFIG` may point to a server-side JSON node registry. Only its
+allowlisted node names can be selected by the browser. Public `/api` actions and
+the indexer continue to use the canonical `BESU_RPC_URL`.
 
 ### Event indexer
 
@@ -78,8 +100,11 @@ The indexer:
 4. Fetches block headers in bounded batches.
 5. Calls `eth_getLogs` only for configured contract addresses and optional
    `topic0` values.
-6. Writes blocks, logs, and the next checkpoint in one SQLite transaction.
-7. Compares stored and canonical block hashes and rolls back indexed data when
+6. Extracts top-level transactions involving configured contracts and fetches
+   receipts only for matched calls and contract-creation candidates.
+7. Writes blocks, logs, contract transactions, and the next checkpoint in one
+   SQLite transaction.
+8. Compares stored and canonical block hashes and rolls back indexed data when
    it detects a reorganization within `INDEXER_REORG_LOOKBACK`.
 
 On the first run, `INDEXER_START_BLOCK` defines the initial block. If it is not
@@ -96,9 +121,11 @@ flowchart TD
     D -->|Balance, nonce, gas, call,<br/>block, transaction, receipt| RPC[Besu JSON-RPC]
     D -->|logs.getLogs| LOGS[(SQLite event_logs)]
     D -->|logs.getIndexedContracts| FILTERS[(SQLite contract_filters)]
+    D -->|account.txlist| TXS[(SQLite contract_transactions)]
 ```
 
-Only `logs.getLogs` exposes indexed blockchain data. The discovery action
+Only `logs.getLogs` and allowlisted `account.txlist` expose indexed blockchain
+data. The discovery action
 `logs.getIndexedContracts` is a local extension for showing which log indexes
 are available; it is not an official Blockscout action.
 
@@ -185,6 +212,29 @@ Secondary indexes support block-range, contract-address, and `topic0`
 queries. `topic1` through `topic3` can be filtered but do not currently have
 dedicated secondary indexes.
 
+### `contract_transactions`
+
+Stores top-level transactions related to configured contracts. Quantities stay
+as hexadecimal text in storage to avoid overflowing SQLite integers; the API
+converts them to Etherscan-compatible decimal strings.
+
+| Column family | Purpose |
+| --- | --- |
+| `chain_id`, `indexed_contract_address`, `transaction_hash` | Composite identity and allowlist ownership |
+| `block_number`, `block_hash`, `block_timestamp`, `transaction_index` | Ordering, paging, confirmations, and reorg rollback |
+| `from_address`, `to_address`, `created_contract_address` | Transaction participants and deployment result |
+| `nonce`, `value`, `gas`, fee fields, `input`, `transaction_type` | Original transaction data |
+| `receipt_status`, `gas_used`, `effective_gas_price` | Mined execution result |
+
+Primary key: `(chain_id, indexed_contract_address, transaction_hash)`. A
+secondary index supports contract/block ordered queries.
+
+When an existing schema-v2 event database first upgrades to schema v3, the
+migration rewinds each chain checkpoint to its earliest registered
+`contract_filters.start_block`. Blocks and logs are idempotently reprocessed so
+the new transaction table is historically backfilled without deleting the
+existing event index.
+
 ## Technology stack
 
 | Layer | Technology |
@@ -214,6 +264,7 @@ Elixir runtime in this standalone service.
 | `HTTP_PORT` | `8080` | API port |
 | `BESU_RPC_URL` | `http://127.0.0.1:8545` | Fixed Besu JSON-RPC endpoint |
 | `BESU_RPC_TIMEOUT_MS` | `5000` | Upstream call timeout |
+| `BESU_NODES_CONFIG` | unset | Optional server-side JSON registry for internal UI node selection |
 | `SQLITE_PATH` | `./data/indexer.sqlite` | SQLite database location |
 | `INDEXER_CONTRACT_ADDRESSES` | none | Required comma-separated allowlist in indexer mode |
 | `INDEXER_TOPIC0` | none | Optional comma-separated event signature hashes |
@@ -223,11 +274,16 @@ Elixir runtime in this standalone service.
 | `INDEXER_POLL_INTERVAL_MS` | `2000` | Delay between polling attempts |
 | `INDEXER_REORG_LOOKBACK` | `128` | Maximum automatic rollback search depth |
 
+For Docker Compose, copy `.env.example` to `.env`. Compose automatically reads
+that file and passes the explicitly mapped values in `docker-compose.yml` to
+the containers. The JVM itself does not implement dotenv parsing, so direct
+host execution must use exported or inline environment variables.
+
 ## Current boundaries
 
 The service does not currently index or derive:
 
-- Complete transaction or address history
+- Complete arbitrary account history and internal contract calls
 - Internal transactions or EVM traces
 - Decoded ERC-20, ERC-721, or ERC-1155 transfers
 - Current or historical token balances and holder lists

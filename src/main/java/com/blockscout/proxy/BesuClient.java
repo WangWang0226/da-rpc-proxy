@@ -68,6 +68,10 @@ final class BesuClient {
         return object.get("result");
     }
 
+    URI endpoint() {
+        return endpoint;
+    }
+
     @SuppressWarnings("unchecked")
     static Map<String, Object> castObject(Map<?, ?> value) {
         return (Map<String, Object>) value;

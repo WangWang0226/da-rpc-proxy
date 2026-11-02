@@ -11,6 +11,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -49,20 +52,50 @@ public final class ProxyIntegrationTest {
         HttpClient http = HttpClient.newHttpClient();
         assertResponse(http, port, "/api/health/liveness", 200, "\"status\":\"live\"");
         assertResponse(http, port, "/api/health/readiness", 200, "\"chain_id\":\"0x539\"");
-        assertResponse(http, port, "/", 200, "Deployment preparation");
+        assertResponse(http, port, "/", 200, "Besu Operations Explorer");
         assertResponse(http, port, "/swagger", 200, "Swagger / OpenAPI 3.0");
         assertResponse(http, port, "/swagger.js", 200, "loadSpec");
         assertResponse(http, port, "/openapi.json", 200, "\"openapi\": \"3.0.3\"");
+        assertResponse(http, port, "/openapi.json", 200, "module=account&action=txlist");
         assertResponse(
                 http,
                 port,
                 "/postman/besu-etherscan-compatible.postman_collection.json",
                 200,
                 "Besu Etherscan-Compatible Proxy");
+        assertResponse(
+                http,
+                port,
+                "/postman/besu-etherscan-compatible.postman_collection.json",
+                200,
+                "account.txlist (allowlisted contracts only)");
+        assertResponse(http, port, "/internal/ui/config", 200, "\"defaultNode\":\"primary\"");
+        assertResponse(
+                http,
+                port,
+                "/internal/ui/explorer?node=primary&lookback=5&transactionLimit=20",
+                200,
+                "\"receiptStatus\":\"0x1\"");
+        assertResponse(http, port, "/internal/ui/nodes/status?node=primary", 200, "Besu/v24.1.0");
+        assertResponse(http, port, "/internal/ui/nodes/status?node=primary", 200, "\"peerCount\":2");
+        assertResponse(http, port, "/internal/ui/validators?node=primary", 200, ADDRESS);
 
         assertResponse(http, port, "/api?module=account&action=balance&address=" + ADDRESS, 200, "1000000000000000000");
         assertResponse(http, port, "/api?module=account&action=balancemulti&address=" + ADDRESS + "," + CONTRACT, 200, "\"stale\":false");
         assertResponse(http, port, "/api?module=account&action=eth_get_balance&address=" + ADDRESS + "&block=latest", 200, "\"jsonrpc\":\"2.0\"");
+        assertResponse(
+                http,
+                port,
+                "/api?module=account&action=txlist&address=" + CONTRACT
+                        + "&startblock=0&endblock=latest&page=1&offset=25&sort=desc",
+                200,
+                "\"gasUsed\":\"21000\"");
+        assertResponse(
+                http,
+                port,
+                "/api?module=account&action=txlist&address=" + ADDRESS,
+                200,
+                "not configured for contract transaction indexing");
         assertResponse(http, port, "/api?module=block&action=eth_block_number", 200, "\"result\":\"0x10\"");
         assertResponse(http, port, "/api?module=proxy&action=eth_chainId", 200, "\"result\":\"0x539\"");
         assertResponse(http, port, "/api?module=proxy&action=eth_getBalance&address=" + ADDRESS, 200, "\"result\":\"0xde0b6b3a7640000\"");
@@ -82,6 +115,7 @@ public final class ProxyIntegrationTest {
         assertResponse(http, port, "/api?module=logs&action=getLogs&fromBlock=16&toBlock=latest&address=" + CONTRACT, 200, TRANSACTION_HASH);
         assertResponse(http, port, "/api?module=logs&action=getLogs&fromBlock=0&toBlock=15", 200, "No logs found");
         assertResponse(http, port, "/api?module=logs&action=getIndexedContracts", 200, CONTRACT);
+        assertResponse(http, port, "/api?module=logs&action=getIndexedContracts", 200, "\"transactionCount\":1");
         assertResponse(http, port, "/api?module=proxy&action=eth_feeHistory&rewardPercentiles=50,10", 200, "strictly increasing");
         assertResponse(http, port, "/api?module=proxy&action=unknown", 200, "Unsupported module/action");
         assertResponse(http, port, "/api/v2/blocks/latest", 404, "Endpoint not supported");
@@ -89,6 +123,7 @@ public final class ProxyIntegrationTest {
     }
 
     private static SqliteStore indexedStoreFromBesu(BesuClient client, Path database) throws InterruptedException {
+        prepareVersionTwoDatabase(database);
         SqliteStore store = new SqliteStore(database);
         Configuration configuration = new Configuration(
                 "indexer",
@@ -106,6 +141,32 @@ public final class ProxyIntegrationTest {
                 List.of());
         new EventIndexer(client, store, configuration).pollOnce();
         return store;
+    }
+
+    private static void prepareVersionTwoDatabase(Path database) {
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + database.toAbsolutePath());
+                Statement statement = connection.createStatement()) {
+            statement.executeUpdate("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)");
+            statement.executeUpdate("INSERT INTO schema_migrations(version) VALUES (1), (2)");
+            statement.executeUpdate("""
+                    CREATE TABLE indexer_checkpoints (
+                      chain_id TEXT PRIMARY KEY, next_block INTEGER NOT NULL,
+                      last_block_hash TEXT, updated_at TEXT
+                    )
+                    """);
+            statement.executeUpdate("INSERT INTO indexer_checkpoints VALUES ('0x539', 100, 'old-hash', CURRENT_TIMESTAMP)");
+            statement.executeUpdate("""
+                    CREATE TABLE contract_filters (
+                      chain_id TEXT NOT NULL, address TEXT NOT NULL, topic0 TEXT NOT NULL DEFAULT '',
+                      start_block INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      PRIMARY KEY (chain_id, address, topic0)
+                    )
+                    """);
+            statement.executeUpdate("INSERT INTO contract_filters VALUES ('0x539', '" + CONTRACT
+                    + "', '', 16, CURRENT_TIMESTAMP)");
+        } catch (Exception exception) {
+            throw new IllegalStateException("Cannot prepare migration test database", exception);
+        }
     }
 
     private static void assertResponse(
@@ -200,8 +261,29 @@ public final class ProxyIntegrationTest {
                 case "eth_getTransactionByHash" -> transaction();
                 case "eth_getTransactionReceipt" -> receipt();
                 case "eth_getLogs" -> List.of(eventLog());
+                case "admin_nodeInfo" -> nodeInfo();
+                case "net_peerCount" -> "0x2";
+                case "txpool_besuTransactions" -> List.of(transaction());
+                case "admin_peers" -> List.of(peer());
+                case "qbft_getValidatorsByBlockNumber" -> List.of(ADDRESS, CONTRACT);
+                case "qbft_getPendingVotes" -> Map.of(CONTRACT, true);
                 default -> null;
             };
+        }
+
+        private Map<String, Object> nodeInfo() {
+            return Map.of(
+                    "id", "test-node-id",
+                    "name", "Besu/v24.1.0",
+                    "enode", "enode://test@127.0.0.1:30303",
+                    "listenAddr", "0.0.0.0:30303");
+        }
+
+        private Map<String, Object> peer() {
+            return Map.of(
+                    "id", "peer-id",
+                    "name", "Besu peer",
+                    "network", Map.of("remoteAddress", "127.0.0.1:30304"));
         }
 
         private Map<String, Object> feeHistory() {
@@ -262,6 +344,7 @@ public final class ProxyIntegrationTest {
             receipt.put("transactionHash", TRANSACTION_HASH);
             receipt.put("status", "0x1");
             receipt.put("gasUsed", "0x5208");
+            receipt.put("effectiveGasPrice", "0x7");
             receipt.put("contractAddress", CONTRACT);
             receipt.put("logs", List.of(log));
             return receipt;

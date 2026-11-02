@@ -21,6 +21,7 @@
         {"name": "account.balance", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=account&action=balance&address={{address}}&tag=latest"}},
         {"name": "account.balancemulti", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=account&action=balancemulti&address={{address}},{{secondAddress}}&tag=latest"}},
         {"name": "account.eth_get_balance", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=account&action=eth_get_balance&address={{address}}&block=latest"}},
+        {"name": "account.txlist (allowlisted contracts only)", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=account&action=txlist&address={{address}}&startblock=0&endblock=latest&page=1&offset=25&sort=desc"}},
         {"name": "block.eth_block_number", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=block&action=eth_block_number"}},
         {"name": "transaction.gettxreceiptstatus", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=transaction&action=gettxreceiptstatus&txhash={{transactionHash}}"}},
         {"name": "transaction.getstatus", "request": {"method": "GET", "url": "{{baseUrl}}/api?module=transaction&action=getstatus&txhash={{transactionHash}}"}},

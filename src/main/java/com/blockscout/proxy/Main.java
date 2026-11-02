@@ -21,8 +21,13 @@ public final class Main {
             System.out.printf("Event indexer started with SQLite at %s%n", configuration.databasePath());
         }
         if (configuration.apiEnabled()) {
+            NodeRegistry nodeRegistry =
+                    NodeRegistry.fromEnvironment(configuration.besuUrl(), configuration.besuTimeout(), client);
             ProxyServer server = new ProxyServer(
-                    new InetSocketAddress(configuration.httpHost(), configuration.httpPort()), client, store);
+                    new InetSocketAddress(configuration.httpHost(), configuration.httpPort()),
+                    client,
+                    store,
+                    new InternalUiService(nodeRegistry));
             server.start(Executors.newVirtualThreadPerTaskExecutor());
             services.add(server::stop);
             System.out.printf(
