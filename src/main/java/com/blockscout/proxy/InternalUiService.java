@@ -1,6 +1,7 @@
 package com.blockscout.proxy;
 
 import java.math.BigInteger;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -13,10 +14,24 @@ import java.util.concurrent.ConcurrentHashMap;
 final class InternalUiService {
     private static final Duration CACHE_TTL = Duration.ofSeconds(5);
     private final NodeRegistry nodes;
+    private final EventIndexer indexer;
+    private final TrackedContractStore trackedContracts;
+    private final SqliteStore store;
     private final Map<String, CacheEntry> explorerCache = new ConcurrentHashMap<>();
 
     InternalUiService(NodeRegistry nodes) {
+        this(nodes, null, null, null);
+    }
+
+    InternalUiService(
+            NodeRegistry nodes,
+            EventIndexer indexer,
+            TrackedContractStore trackedContracts,
+            SqliteStore store) {
         this.nodes = nodes;
+        this.indexer = indexer;
+        this.trackedContracts = trackedContracts;
+        this.store = store;
     }
 
     Map<String, Object> configuration() {
@@ -66,6 +81,137 @@ final class InternalUiService {
         response.put("pendingVotes", optionalCall(node.client(), "qbft_getPendingVotes", List.of()));
         response.put("checkedAt", Instant.now().toString());
         return response;
+    }
+
+    Map<String, Object> indexerStatus() {
+        requireIndexerManagement();
+        return indexer.status();
+    }
+
+    Map<String, Object> trackedContracts() {
+        requireIndexerManagement();
+        return indexer.status();
+    }
+
+    Map<String, Object> addContract(Map<String, Object> request) throws InterruptedException {
+        requireIndexerManagement();
+        String name = requestString(request, "name");
+        String address = requestString(request, "address").toLowerCase();
+        long startBlock = requestLong(request, "startBlock");
+        long head = quantity(nodes.get(null).client().call("eth_blockNumber", List.of()), "block number");
+        if (startBlock > head) {
+            throw new IllegalArgumentException("startBlock must not be greater than the current chain head");
+        }
+        Object code = nodes.get(null).client().call("eth_getCode", List.of(address, "latest"));
+        if (!(code instanceof String string) || string.equals("0x") || string.equals("0x0")) {
+            throw new IllegalArgumentException("No contract bytecode exists at this address on the selected chain");
+        }
+        List<String> topics = requestTopics(request.get("topics"));
+        return trackedContracts.add(name, address, startBlock, topics).toMap();
+    }
+
+    Map<String, Object> updateContract(String address, Map<String, Object> request) {
+        requireIndexerManagement();
+        Object enabled = request.get("enabled");
+        if (!(enabled instanceof Boolean flag)) {
+            throw new IllegalArgumentException("enabled must be true or false");
+        }
+        return trackedContracts.updateEnabled(address, flag).toMap();
+    }
+
+    Map<String, Object> reindexContract(String address, Map<String, Object> request) throws InterruptedException {
+        requireIndexerManagement();
+        long startBlock = requestLong(request, "startBlock");
+        BesuClient client = nodes.get(null).client();
+        long head = quantity(client.call("eth_blockNumber", List.of()), "block number");
+        if (startBlock > head) {
+            throw new IllegalArgumentException("startBlock must not be greater than the current chain head");
+        }
+        String chainId = string(client.call("eth_chainId", List.of()), "chain ID").toLowerCase();
+        TrackedContractStore.TrackedContract updated = trackedContracts.updateStartBlock(address, startBlock);
+        store.resetContract(chainId, updated.address(), startBlock);
+        return updated.toMap();
+    }
+
+    Map<String, Object> removeContract(String address, boolean purge) throws InterruptedException {
+        requireIndexerManagement();
+        String chainId = string(nodes.get(null).client().call("eth_chainId", List.of()), "chain ID").toLowerCase();
+        TrackedContractStore.TrackedContract contract = trackedContracts.get(address);
+        trackedContracts.remove(address);
+        store.removeContract(chainId, contract.address(), purge);
+        return Map.of("removed", contract.address(), "purged", purge);
+    }
+
+    Map<String, Object> transactionDetails(String nodeName, String hash) throws InterruptedException {
+        if (!hash.matches("0x[0-9a-fA-F]{64}")) {
+            throw new IllegalArgumentException("Invalid transaction hash");
+        }
+        BesuClient client = nodes.get(nodeName).client();
+        Object rawTransaction = client.call("eth_getTransactionByHash", List.of(hash));
+        if (!(rawTransaction instanceof Map<?, ?> transactionMap)) {
+            throw new IllegalArgumentException("Transaction not found");
+        }
+        Map<String, Object> transaction = new LinkedHashMap<>(BesuClient.castObject(transactionMap));
+        Object receipt = optionalCall(client, "eth_getTransactionReceipt", List.of(hash));
+        Object blockNumber = transaction.get("blockNumber");
+        Object block = blockNumber instanceof String blockTag
+                ? optionalCall(client, "eth_getBlockByNumber", List.of(blockTag, false))
+                : null;
+        Object latest = client.call("eth_blockNumber", List.of());
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("transaction", transaction);
+        response.put("receipt", receipt);
+        response.put("block", block);
+        response.put("latestBlock", latest);
+        return response;
+    }
+
+    private void requireIndexerManagement() {
+        if (indexer == null || trackedContracts == null || store == null) {
+            throw new IllegalStateException("Indexer management is not available in this service mode");
+        }
+    }
+
+    private static String requestString(Map<String, Object> request, String name) {
+        Object value = request.get(name);
+        if (value instanceof String string && !string.isBlank()) {
+            return string.trim();
+        }
+        throw new IllegalArgumentException(name + " is required");
+    }
+
+    private static long requestLong(Map<String, Object> request, String name) {
+        Object value = request.get(name);
+        if (value instanceof Number number) {
+            try {
+                long result = number instanceof BigDecimal decimal
+                        ? decimal.toBigIntegerExact().longValueExact()
+                        : BigInteger.valueOf(number.longValue()).longValueExact();
+                if (result >= 0) {
+                    return result;
+                }
+            } catch (ArithmeticException ignored) {
+                // Report the same validation error for fractional and out-of-range values.
+            }
+        }
+        throw new IllegalArgumentException(name + " must be a non-negative integer");
+    }
+
+    private static List<String> requestTopics(Object value) {
+        if (value == null) {
+            return List.of();
+        }
+        if (!(value instanceof List<?> raw)) {
+            throw new IllegalArgumentException("topics must be an array");
+        }
+        List<String> topics = new ArrayList<>();
+        for (Object topic : raw) {
+            if (!(topic instanceof String string)) {
+                throw new IllegalArgumentException("topics must contain strings");
+            }
+            topics.add(string);
+        }
+        return topics;
     }
 
     private static Map<String, Object> loadExplorer(

@@ -9,6 +9,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -22,6 +23,7 @@ final class ProxyServer {
     private final BesuClient client;
     private final SqliteStore store;
     private final InternalUiService internalUi;
+    private final String contractAdminToken;
 
     ProxyServer(InetSocketAddress address, BesuClient client) throws IOException {
         this(address, client, null);
@@ -32,16 +34,28 @@ final class ProxyServer {
                 address,
                 client,
                 store,
-                new InternalUiService(NodeRegistry.single("primary", client.endpoint(), client)));
+                new InternalUiService(NodeRegistry.single("primary", client.endpoint(), client)),
+                "");
     }
 
     ProxyServer(
             InetSocketAddress address, BesuClient client, SqliteStore store, InternalUiService internalUi)
             throws IOException {
+        this(address, client, store, internalUi, "");
+    }
+
+    ProxyServer(
+            InetSocketAddress address,
+            BesuClient client,
+            SqliteStore store,
+            InternalUiService internalUi,
+            String contractAdminToken)
+            throws IOException {
         this.server = HttpServer.create(address, 0);
         this.client = client;
         this.store = store;
         this.internalUi = internalUi;
+        this.contractAdminToken = contractAdminToken;
         server.createContext("/", this::handle);
     }
 
@@ -61,8 +75,8 @@ final class ProxyServer {
     private void handle(HttpExchange exchange) throws IOException {
         try {
             addSecurityHeaders(exchange);
-            if (!List.of("GET", "POST").contains(exchange.getRequestMethod())) {
-                sendJson(exchange, 405, Map.of("message", "Only GET and documented POST endpoints are supported"));
+            if (!List.of("GET", "POST", "PATCH", "DELETE").contains(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, Map.of("message", "HTTP method is not supported"));
                 return;
             }
             String rawPath = exchange.getRequestURI().getRawPath();
@@ -77,6 +91,8 @@ final class ProxyServer {
             sendJson(exchange, 503, Map.of("message", "Request interrupted"));
         } catch (BesuClient.UpstreamException exception) {
             sendJson(exchange, exception.status(), Map.of("message", exception.getMessage()));
+        } catch (AdminAuthorizationException exception) {
+            sendJson(exchange, 401, Map.of("message", "Invalid contract administration token"));
         } catch (IllegalArgumentException | ArithmeticException exception) {
             sendJson(exchange, 422, Map.of("message", exception.getMessage()));
         } catch (Exception exception) {
@@ -89,6 +105,10 @@ final class ProxyServer {
     private void route(HttpExchange exchange, String path) throws IOException, InterruptedException {
         String method = exchange.getRequestMethod();
         if (path.equals("/api") || path.equals("/api/")) {
+            if (!method.equals("GET") && !method.equals("POST")) {
+                sendJson(exchange, 405, Map.of("message", "This endpoint only supports GET and POST"));
+                return;
+            }
             etherscanApi(exchange);
             return;
         }
@@ -96,8 +116,8 @@ final class ProxyServer {
             internalUiApi(exchange, path);
             return;
         }
-        if ("POST".equals(method)) {
-            sendJson(exchange, 405, Map.of("message", "POST is only supported by /api"));
+        if (!"GET".equals(method)) {
+            sendJson(exchange, 405, Map.of("message", "This endpoint only supports GET"));
             return;
         }
         if (path.equals("/")) {
@@ -126,25 +146,93 @@ final class ProxyServer {
     }
 
     private void internalUiApi(HttpExchange exchange, String path) throws IOException, InterruptedException {
-        if (!"GET".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("message", "Internal UI endpoints only support GET"));
-            return;
-        }
+        String method = exchange.getRequestMethod();
         Map<String, String> params = parseQuery(exchange.getRequestURI().getRawQuery());
-        Object response = switch (path) {
-            case "/internal/ui/config" -> internalUi.configuration();
-            case "/internal/ui/explorer" -> internalUi.explorer(
+        Object response;
+        if (method.equals("GET") && path.equals("/internal/ui/config")) {
+            response = internalUi.configuration();
+        } else if (method.equals("GET") && path.equals("/internal/ui/explorer")) {
+            response = internalUi.explorer(
                     params.get("node"),
                     positiveParameter(params, "lookback", 5, 30),
                     positiveParameter(params, "transactionLimit", 20, 20));
-            case "/internal/ui/nodes/status" -> internalUi.nodeStatus(params.get("node"));
-            case "/internal/ui/validators" -> internalUi.validators(params.get("node"));
-            default -> null;
-        };
+        } else if (method.equals("GET") && path.equals("/internal/ui/nodes/status")) {
+            response = internalUi.nodeStatus(params.get("node"));
+        } else if (method.equals("GET") && path.equals("/internal/ui/validators")) {
+            response = internalUi.validators(params.get("node"));
+        } else if (method.equals("GET") && path.equals("/internal/ui/indexer/status")) {
+            response = internalUi.indexerStatus();
+        } else if (method.equals("GET") && path.equals("/internal/ui/contracts")) {
+            response = internalUi.trackedContracts();
+        } else if (method.equals("GET") && path.equals("/internal/ui/transaction")) {
+            response = internalUi.transactionDetails(params.get("node"), required(params, "hash"));
+        } else if (method.equals("POST") && path.equals("/internal/ui/contracts")) {
+            requireAdmin(exchange);
+            response = internalUi.addContract(jsonBody(exchange));
+        } else if (path.startsWith("/internal/ui/contracts/")) {
+            requireAdmin(exchange);
+            String remainder = path.substring("/internal/ui/contracts/".length());
+            boolean reindex = remainder.endsWith("/reindex");
+            String address = reindex ? remainder.substring(0, remainder.length() - "/reindex".length()) : remainder;
+            if (method.equals("PATCH") && !reindex) {
+                response = internalUi.updateContract(address, jsonBody(exchange));
+            } else if (method.equals("POST") && reindex) {
+                response = internalUi.reindexContract(address, jsonBody(exchange));
+            } else if (method.equals("DELETE") && !reindex) {
+                response = internalUi.removeContract(address, booleanQueryParameter(params, "purge", false));
+            } else {
+                response = null;
+            }
+        } else {
+            response = null;
+        }
         if (response == null) {
             sendJson(exchange, 404, Map.of("message", "Internal UI endpoint not supported"));
         } else {
             sendJson(exchange, 200, response);
+        }
+    }
+
+    private static boolean booleanQueryParameter(Map<String, String> params, String name, boolean defaultValue) {
+        String value = params.get(name);
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (value.equalsIgnoreCase("false")) {
+            return false;
+        }
+        throw new IllegalArgumentException(name + " must be true or false");
+    }
+
+    private Map<String, Object> jsonBody(HttpExchange exchange) throws IOException {
+        byte[] bytes = exchange.getRequestBody().readNBytes(MAX_REQUEST_BODY_BYTES + 1);
+        if (bytes.length > MAX_REQUEST_BODY_BYTES) {
+            throw new IllegalArgumentException("Request body exceeds 256 KiB");
+        }
+        String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
+        if (contentType == null || !contentType.toLowerCase().startsWith("application/json")) {
+            throw new IllegalArgumentException("Internal mutation endpoints require application/json");
+        }
+        Object parsed = Json.parse(new String(bytes, StandardCharsets.UTF_8));
+        if (!(parsed instanceof Map<?, ?> raw)) {
+            throw new IllegalArgumentException("JSON request body must be an object");
+        }
+        return BesuClient.castObject(raw);
+    }
+
+    private void requireAdmin(HttpExchange exchange) {
+        if (contractAdminToken == null || contractAdminToken.isBlank()) {
+            return;
+        }
+        String supplied = exchange.getRequestHeaders().getFirst("X-Contract-Admin-Token");
+        if (supplied == null
+                || !MessageDigest.isEqual(
+                        contractAdminToken.getBytes(StandardCharsets.UTF_8),
+                        supplied.getBytes(StandardCharsets.UTF_8))) {
+            throw new AdminAuthorizationException();
         }
     }
 
@@ -647,5 +735,9 @@ final class ProxyServer {
         exchange.getResponseHeaders().set("Content-Type", contentType);
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
+    }
+
+    private static final class AdminAuthorizationException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
     }
 }

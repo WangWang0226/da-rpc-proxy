@@ -82,6 +82,12 @@ tbody tr:hover { background: #fafcff; }
 .status-badge.pending { background: #fff9db; color: var(--warning); }
 
 .alert { border: 1px solid #ffc9c9; border-radius: .5rem; background: #fff5f5; color: var(--danger); padding: .75rem 1rem; font-size: .84rem; }
+.sync-banner { display: flex; align-items: center; gap: .65rem; border: 1px solid #ffe08a; border-radius: .55rem; background: #fff9db; color: #795500; padding: .75rem 1rem; font-size: .82rem; }
+.sync-banner::before { width: .65rem; height: .65rem; flex: 0 0 auto; border-radius: 50%; background: #f59f00; content: ""; }
+.sync-banner.caught-up { border-color: #b2f2db; background: #e6fcf5; color: var(--success); }
+.sync-banner.caught-up::before { background: #12b886; }
+.sync-banner.error { border-color: #ffc9c9; background: #fff5f5; color: var(--danger); }
+.sync-banner.error::before { background: #fa5252; }
 .hidden { display: none !important; }
 .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .detail-list { display: grid; gap: 0; margin: 0; }
@@ -105,6 +111,11 @@ pre { overflow: auto; max-height: 28rem; margin: 0; border-radius: .55rem; backg
 .form-grid select { display: block; width: 100%; margin-top: .35rem; }
 .transaction-search-grid { grid-template-columns: 2fr 1fr 1fr 1fr auto; }
 .row-actions { display: flex; gap: .65rem; white-space: nowrap; }
+.contract-name { display: block; margin-bottom: .22rem; color: var(--navy); font-weight: 800; }
+.contract-address { display: block; color: var(--muted); font-size: .72rem; }
+.progress-track { width: 8rem; height: .42rem; overflow: hidden; border-radius: 99px; background: #e9eef5; }
+.progress-track > span { display: block; height: 100%; background: var(--blue); }
+.progress-label { display: block; margin-top: .3rem; color: var(--muted); font-size: .7rem; }
 .planned { border-style: dashed; background: #fbfcfe; }
 .planned p { margin: .35rem 0 0; color: var(--muted); }
 
@@ -130,6 +141,21 @@ dialog { width: min(760px, calc(100% - 2rem)); max-height: calc(100vh - 4rem); b
 dialog::backdrop { background: rgb(16 42 67 / 45%); backdrop-filter: blur(2px); }
 .dialog-heading { margin-bottom: .8rem; }
 .icon-button { display: grid; width: 2rem; height: 2rem; place-items: center; border-color: var(--border); background: white; color: var(--text); padding: 0; font-size: 1.3rem; }
+.detail-tabs { display: flex; gap: .35rem; margin-bottom: .8rem; border-bottom: 1px solid var(--border); }
+.detail-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: .55rem .7rem; }
+.detail-tabs button.active { border-bottom-color: var(--blue); color: var(--blue); }
+.detail-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1.2rem; margin-bottom: .8rem; }
+.detail-field { min-width: 0; border-bottom: 1px solid #edf0f4; padding: .65rem 0; }
+.detail-field.wide { grid-column: 1 / -1; }
+.detail-field span, .detail-field strong, .detail-field small { display: block; }
+.detail-field span { color: var(--muted); font-size: .7rem; font-weight: 800; text-transform: uppercase; }
+.detail-field strong { overflow-wrap: anywhere; margin-top: .28rem; font-family: ui-monospace, monospace; font-size: .78rem; font-weight: 600; }
+.detail-field small { margin-top: .2rem; color: var(--muted); font-size: .7rem; }
+.dialog-copy { margin: -.25rem 0 1rem; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+.dialog-form { display: grid; gap: .8rem; }
+.dialog-form label { color: var(--muted); font-size: .75rem; font-weight: 750; }
+.dialog-form input { display: block; width: 100%; margin-top: .35rem; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: .6rem; margin-top: .35rem; }
 .toast { position: fixed; z-index: 30; right: 1rem; bottom: 1rem; transform: translateY(150%); border-radius: .5rem; background: var(--navy); color: white; padding: .75rem 1rem; box-shadow: 0 12px 32px rgb(16 42 67 / 30%); transition: transform .2s; }
 .toast.visible { transform: translateY(0); }
 .toast.failed { background: var(--danger); }
@@ -157,5 +183,6 @@ dialog::backdrop { background: rgb(16 42 67 / 45%); backdrop-filter: blur(2px); 
   .console-response { grid-column: 1; }
   .console-picker { position: static; }
   .detail-list > div { grid-template-columns: 1fr; gap: .25rem; }
+  .detail-overview { grid-template-columns: 1fr; }
   .actions { align-items: stretch; flex-direction: column; }
 }

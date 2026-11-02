@@ -1,41 +1,33 @@
 services:
-  api:
+  app:
     image: besu-rpc-proxy:local
     build: .
     environment:
-      SERVICE_MODE: api
+      SERVICE_MODE: all
       HTTP_HOST: 0.0.0.0
       BESU_RPC_URL: ${BESU_RPC_URL:-http://host.docker.internal:8545}
       BESU_RPC_TIMEOUT_MS: ${BESU_RPC_TIMEOUT_MS:-5000}
       SQLITE_PATH: /data/indexer.sqlite
-    ports:
-      - "8080:8080"
-    volumes:
-      - indexer-data:/data
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-
-  indexer:
-    image: besu-rpc-proxy:local
-    build: .
-    environment:
-      SERVICE_MODE: indexer
-      BESU_RPC_URL: ${BESU_RPC_URL:-http://host.docker.internal:8545}
-      BESU_RPC_TIMEOUT_MS: ${BESU_RPC_TIMEOUT_MS:-5000}
-      SQLITE_PATH: /data/indexer.sqlite
-      INDEXER_CONTRACT_ADDRESSES: ${INDEXER_CONTRACT_ADDRESSES:?set contract addresses}
+      CONTRACT_CONFIG_PATH: /config/tracked-contracts.json
+      CONTRACT_ADMIN_TOKEN: ${CONTRACT_ADMIN_TOKEN:-}
+      INDEXER_CONTRACT_ADDRESSES: ${INDEXER_CONTRACT_ADDRESSES:-}
       INDEXER_TOPIC0: ${INDEXER_TOPIC0:-}
-      INDEXER_START_BLOCK: ${INDEXER_START_BLOCK:-}
+      INDEXER_START_BLOCK: ${INDEXER_START_BLOCK:-0}
       INDEXER_CONFIRMATIONS: ${INDEXER_CONFIRMATIONS:-0}
       INDEXER_BATCH_SIZE: ${INDEXER_BATCH_SIZE:-500}
       INDEXER_POLL_INTERVAL_MS: ${INDEXER_POLL_INTERVAL_MS:-2000}
       INDEXER_REORG_LOOKBACK: ${INDEXER_REORG_LOOKBACK:-128}
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xms128m -Xmx384m}
+    ports:
+      - "8080:8080"
     volumes:
-      - indexer-data:/data
+      - contract-config:/config
+    tmpfs:
+      - /data:size=${SQLITE_TMPFS_SIZE:-256m},uid=10001,gid=10001,mode=0770
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-1g}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 volumes:
-  indexer-data:
+  contract-config:

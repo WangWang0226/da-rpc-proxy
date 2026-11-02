@@ -1,9 +1,11 @@
 package com.blockscout.proxy;
 
+import java.io.IOException;
 import java.math.BigInteger;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,19 +18,23 @@ final class EventIndexer implements AutoCloseable {
     private final BesuClient client;
     private final SqliteStore store;
     private final Configuration configuration;
+    private final TrackedContractStore trackedContracts;
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean polling = new AtomicBoolean();
     private volatile String chainId;
+    private volatile long latestHead = -1;
+    private volatile long latestSafeHead = -1;
     private volatile String lastError;
 
-    EventIndexer(BesuClient client, SqliteStore store, Configuration configuration) {
+    EventIndexer(
+            BesuClient client,
+            SqliteStore store,
+            Configuration configuration,
+            TrackedContractStore trackedContracts) {
         this.client = client;
         this.store = store;
         this.configuration = configuration;
-        if (configuration.addresses().isEmpty()) {
-            throw new IllegalArgumentException(
-                    "INDEXER_CONTRACT_ADDRESSES is required in indexer mode to prevent accidental full-chain indexing");
-        }
+        this.trackedContracts = trackedContracts;
     }
 
     void start() {
@@ -42,7 +48,6 @@ final class EventIndexer implements AutoCloseable {
         }
         try {
             pollOnce();
-            lastError = null;
         } catch (RuntimeException | InterruptedException exception) {
             if (exception instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
@@ -55,37 +60,57 @@ final class EventIndexer implements AutoCloseable {
     }
 
     void pollOnce() throws InterruptedException {
+        lastError = null;
         if (chainId == null) {
             chainId = stringResult(client.call("eth_chainId", List.of()), "chain id").toLowerCase();
         }
-        long head = quantity(client.call("eth_blockNumber", List.of()), "block number");
-        long safeHead = Math.max(-1, head - configuration.confirmations());
-        SqliteStore.Checkpoint checkpoint = store.checkpoint(chainId);
-        if (checkpoint == null) {
-            long start = configuration.startBlock() == null ? safeHead + 1 : configuration.startBlock();
-            store.initializeCheckpoint(chainId, start);
-            checkpoint = store.checkpoint(chainId);
+        latestHead = quantity(client.call("eth_blockNumber", List.of()), "block number");
+        latestSafeHead = Math.max(-1, latestHead - configuration.confirmations());
+        for (TrackedContractStore.TrackedContract contract : trackedContracts.all()) {
+            if (!contract.enabled()) {
+                SqliteStore.ContractCheckpoint checkpoint = store.contractCheckpoint(chainId, contract.address());
+                if (checkpoint != null) {
+                    store.updateContractState(chainId, contract.address(), "paused", null);
+                }
+                continue;
+            }
+            try {
+                pollContract(contract, latestSafeHead);
+            } catch (RuntimeException exception) {
+                store.initializeContractCheckpoint(chainId, contract.address(), contract.startBlock());
+                store.updateContractState(chainId, contract.address(), "error", exception.getMessage());
+                if (lastError == null) {
+                    lastError = exception.getMessage();
+                }
+                System.err.printf("Contract index failed for %s: %s%n", contract.address(), exception.getMessage());
+            }
         }
-        store.registerFilters(
-                chainId, configuration.addresses(), configuration.topic0Values(), checkpoint.nextBlock());
-        checkpoint = repairReorg(checkpoint);
+    }
+
+    private void pollContract(TrackedContractStore.TrackedContract contract, long safeHead)
+            throws InterruptedException {
+        store.initializeContractCheckpoint(chainId, contract.address(), contract.startBlock());
+        store.registerFilters(chainId, List.of(contract.address()), contract.topics(), contract.startBlock());
+        SqliteStore.ContractCheckpoint checkpoint = store.contractCheckpoint(chainId, contract.address());
+        checkpoint = repairReorg(contract.address(), checkpoint);
         if (checkpoint.nextBlock() > safeHead) {
+            store.updateContractState(chainId, contract.address(), "caught_up", null);
             return;
         }
         long toBlock = Math.min(safeHead, checkpoint.nextBlock() + configuration.batchSize() - 1L);
-        indexRange(checkpoint.nextBlock(), toBlock);
+        indexRange(contract, checkpoint.nextBlock(), toBlock, safeHead);
     }
 
-    private SqliteStore.Checkpoint repairReorg(SqliteStore.Checkpoint checkpoint) throws InterruptedException {
-        if (checkpoint.nextBlock() == 0 || checkpoint.lastBlockHash() == null) {
+    private SqliteStore.ContractCheckpoint repairReorg(
+            String address, SqliteStore.ContractCheckpoint checkpoint) throws InterruptedException {
+        if (checkpoint.nextBlock() == checkpoint.startBlock() || checkpoint.lastBlockHash() == null) {
             return checkpoint;
         }
         long lastNumber = checkpoint.nextBlock() - 1;
-        Map<String, Object> canonical = block(lastNumber, false);
-        if (checkpoint.lastBlockHash().equalsIgnoreCase(stringField(canonical, "hash"))) {
+        if (checkpoint.lastBlockHash().equalsIgnoreCase(stringField(block(lastNumber, false), "hash"))) {
             return checkpoint;
         }
-        long minimum = Math.max(-1, lastNumber - configuration.reorgLookback());
+        long minimum = Math.max(checkpoint.startBlock() - 1, lastNumber - configuration.reorgLookback());
         long commonAncestor = lastNumber - 1;
         while (commonAncestor > minimum) {
             String storedHash = store.blockHash(chainId, commonAncestor);
@@ -95,37 +120,35 @@ final class EventIndexer implements AutoCloseable {
             }
             commonAncestor--;
         }
-        if (commonAncestor <= minimum && minimum >= 0) {
-            throw new IllegalStateException("Reorg exceeds INDEXER_REORG_LOOKBACK; manual recovery is required");
+        if (commonAncestor <= minimum && minimum >= checkpoint.startBlock()) {
+            throw new IllegalStateException("Reorg exceeds INDEXER_REORG_LOOKBACK; reindex this contract");
         }
-        System.err.printf("Reorg detected; rolling back to block %d%n", commonAncestor);
-        store.rollbackAfter(chainId, commonAncestor);
-        return store.checkpoint(chainId);
+        store.rollbackContractAfter(chainId, address, commonAncestor);
+        return store.contractCheckpoint(chainId, address);
     }
 
-    private void indexRange(long fromBlock, long toBlock) throws InterruptedException {
+    private void indexRange(
+            TrackedContractStore.TrackedContract contract, long fromBlock, long toBlock, long safeHead)
+            throws InterruptedException {
         List<SqliteStore.IndexedBlock> blocks = new ArrayList<>();
         List<SqliteStore.IndexedTransaction> transactions = new ArrayList<>();
-        Map<Long, Long> timestamps = new HashMap<>();
+        Map<Long, Long> timestamps = new LinkedHashMap<>();
         for (long number = fromBlock; number <= toBlock; number++) {
             Map<String, Object> block = block(number, true);
             long timestamp = quantity(block.get("timestamp"), "block timestamp");
             blocks.add(new SqliteStore.IndexedBlock(
                     number, stringField(block, "hash"), stringField(block, "parentHash"), timestamp));
             timestamps.put(number, timestamp);
-            transactions.addAll(indexedTransactions(block, number, timestamp));
+            transactions.addAll(indexedTransactions(block, number, timestamp, contract.address()));
         }
 
         Map<String, Object> filter = new LinkedHashMap<>();
         filter.put("fromBlock", hex(fromBlock));
         filter.put("toBlock", hex(toBlock));
-        filter.put("address", configuration.addresses().size() == 1
-                ? configuration.addresses().getFirst()
-                : configuration.addresses());
-        if (!configuration.topic0Values().isEmpty()) {
-            filter.put("topics", List.of(configuration.topic0Values().size() == 1
-                    ? configuration.topic0Values().getFirst()
-                    : configuration.topic0Values()));
+        filter.put("address", contract.address());
+        if (!contract.topics().isEmpty()) {
+            filter.put("topics", List.of(
+                    contract.topics().size() == 1 ? contract.topics().getFirst() : contract.topics()));
         }
         Object rawLogs = client.call("eth_getLogs", List.of(filter));
         if (!(rawLogs instanceof List<?> logs)) {
@@ -149,17 +172,16 @@ final class EventIndexer implements AutoCloseable {
                     stringField(log, "data"),
                     timestamps.getOrDefault(blockNumber, 0L)));
         }
-        store.persistBatch(chainId, blocks, indexedLogs, transactions);
+        store.persistContractBatch(
+                chainId, contract.address(), blocks, indexedLogs, transactions, toBlock >= safeHead);
         System.out.printf(
-                "Indexed blocks %d-%d, %d logs, and %d contract transactions%n",
-                fromBlock,
-                toBlock,
-                indexedLogs.size(),
-                transactions.size());
+                "Indexed %s blocks %d-%d, %d logs, and %d contract transactions%n",
+                contract.address(), fromBlock, toBlock, indexedLogs.size(), transactions.size());
     }
 
     private List<SqliteStore.IndexedTransaction> indexedTransactions(
-            Map<String, Object> block, long blockNumber, long timestamp) throws InterruptedException {
+            Map<String, Object> block, long blockNumber, long timestamp, String trackedAddress)
+            throws InterruptedException {
         Object rawTransactions = block.get("transactions");
         if (!(rawTransactions instanceof List<?> values)) {
             throw new BesuClient.UpstreamException("Besu returned invalid block transactions", 502);
@@ -172,21 +194,15 @@ final class EventIndexer implements AutoCloseable {
             Map<String, Object> transaction = BesuClient.castObject(rawTransaction);
             String to = optionalString(transaction.get("to"));
             String from = stringField(transaction, "from").toLowerCase();
-            String matchedAddress = configuredAddress(to);
-            if (matchedAddress == null) {
-                matchedAddress = configuredAddress(from);
-            }
-
+            boolean directMatch = trackedAddress.equalsIgnoreCase(from)
+                    || (to != null && trackedAddress.equalsIgnoreCase(to));
             Map<String, Object> receipt = null;
             String createdContract = null;
-            if (matchedAddress != null || to == null) {
+            if (directMatch || to == null) {
                 receipt = receipt(stringField(transaction, "hash"));
                 createdContract = optionalString(receipt.get("contractAddress"));
-                if (matchedAddress == null) {
-                    matchedAddress = configuredAddress(createdContract);
-                }
             }
-            if (matchedAddress == null) {
+            if (!directMatch && (createdContract == null || !trackedAddress.equalsIgnoreCase(createdContract))) {
                 continue;
             }
             if (receipt == null) {
@@ -194,7 +210,7 @@ final class EventIndexer implements AutoCloseable {
                 createdContract = optionalString(receipt.get("contractAddress"));
             }
             transactions.add(new SqliteStore.IndexedTransaction(
-                    matchedAddress,
+                    trackedAddress,
                     stringField(transaction, "hash").toLowerCase(),
                     blockNumber,
                     stringField(block, "hash").toLowerCase(),
@@ -218,12 +234,80 @@ final class EventIndexer implements AutoCloseable {
         return transactions;
     }
 
-    private String configuredAddress(String value) {
-        if (value == null) {
-            return null;
+    Map<String, Object> status() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("state", overallState());
+        result.put("chainId", chainId);
+        result.put("chainHead", latestHead < 0 ? null : latestHead);
+        result.put("safeHead", latestSafeHead < 0 ? null : latestSafeHead);
+        result.put("polling", polling.get());
+        result.put("lastError", lastError);
+        List<Map<String, Object>> contractValues = new ArrayList<>();
+        if (chainId != null) {
+            for (TrackedContractStore.TrackedContract contract : trackedContracts.all()) {
+                Map<String, Object> value = new LinkedHashMap<>(contract.toMap());
+                SqliteStore.ContractCheckpoint checkpoint = store.contractCheckpoint(chainId, contract.address());
+                value.put("nextBlock", checkpoint == null ? contract.startBlock() : checkpoint.nextBlock());
+                value.put("state", checkpoint == null ? "initializing" : checkpoint.state());
+                value.put("lastError", checkpoint == null ? null : checkpoint.lastError());
+                value.put("indexedAt", checkpoint == null ? null : checkpoint.updatedAt());
+                value.put("progress", progress(contract.startBlock(), checkpoint));
+                value.put("eventCount", store.eventCount(chainId, contract.address()));
+                value.put("transactionCount", store.transactionCount(chainId, contract.address()));
+                contractValues.add(value);
+            }
         }
-        String normalized = value.toLowerCase();
-        return configuration.addresses().contains(normalized) ? normalized : null;
+        result.put("contracts", contractValues);
+        result.put("storage", storageStatus());
+        return result;
+    }
+
+    private String overallState() {
+        if (lastError != null) {
+            return "error";
+        }
+        if (chainId == null || latestSafeHead < 0) {
+            return "initializing";
+        }
+        for (TrackedContractStore.TrackedContract contract : trackedContracts.enabled()) {
+            SqliteStore.ContractCheckpoint checkpoint = store.contractCheckpoint(chainId, contract.address());
+            if (checkpoint == null || checkpoint.nextBlock() <= latestSafeHead) {
+                return "syncing";
+            }
+        }
+        return "caught_up";
+    }
+
+    private double progress(long startBlock, SqliteStore.ContractCheckpoint checkpoint) {
+        if (latestSafeHead < startBlock) {
+            return 100.0;
+        }
+        long nextBlock = checkpoint == null ? startBlock : checkpoint.nextBlock();
+        long total = latestSafeHead - startBlock + 1;
+        long completed = Math.max(0, Math.min(total, nextBlock - startBlock));
+        return Math.round((completed * 10_000.0) / total) / 100.0;
+    }
+
+    private Map<String, Object> storageStatus() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        Path database = configuration.databasePath().toAbsolutePath();
+        result.put("databaseBytes", fileSize(database));
+        result.put("walBytes", fileSize(Path.of(database + "-wal")));
+        result.put("shmBytes", fileSize(Path.of(database + "-shm")));
+        try {
+            result.put("usableBytes", Files.getFileStore(database.getParent()).getUsableSpace());
+        } catch (IOException exception) {
+            result.put("usableBytes", null);
+        }
+        return result;
+    }
+
+    private static long fileSize(Path path) {
+        try {
+            return Files.exists(path) ? Files.size(path) : 0;
+        } catch (IOException exception) {
+            return 0;
+        }
     }
 
     private Map<String, Object> receipt(String hash) throws InterruptedException {
@@ -240,15 +324,6 @@ final class EventIndexer implements AutoCloseable {
             throw new BesuClient.UpstreamException("Besu returned no block for " + number, 502);
         }
         return BesuClient.castObject(raw);
-    }
-
-    private static String quantityString(Map<String, Object> object, String field, String defaultValue) {
-        String value = optionalString(object.get(field));
-        return value == null ? defaultValue : value;
-    }
-
-    private static String optionalString(Object value) {
-        return value instanceof String string && !string.isBlank() ? string : null;
     }
 
     private static List<String> topics(Object value) {
@@ -272,6 +347,15 @@ final class EventIndexer implements AutoCloseable {
         } catch (ArithmeticException exception) {
             throw new BesuClient.UpstreamException(label + " is too large", 502);
         }
+    }
+
+    private static String quantityString(Map<String, Object> object, String field, String defaultValue) {
+        String value = optionalString(object.get(field));
+        return value == null ? defaultValue : value;
+    }
+
+    private static String optionalString(Object value) {
+        return value instanceof String string && !string.isBlank() ? string : null;
     }
 
     private static String stringField(Map<String, Object> object, String field) {

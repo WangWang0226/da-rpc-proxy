@@ -38,6 +38,7 @@
           </div>
         </div>
         <div id="explorer-alert" class="alert hidden" role="alert"></div>
+        <div id="explorer-indexer-banner" class="sync-banner hidden" role="status"></div>
         <div class="summary-grid">
           <article class="metric"><span>Chain ID</span><strong id="chain-id">—</strong><small>Signing domain</small></article>
           <article class="metric"><span>Latest block</span><strong id="latest-block">—</strong><small>Current Besu head</small></article>
@@ -81,9 +82,10 @@
       </section>
 
       <section class="page" data-page="contracts">
-        <div class="page-heading"><div><p class="eyebrow">SQLite event index</p><h1>Contracts</h1><p>Browse configured contract indexes and query their persisted events.</p></div><button id="refresh-contracts" type="button">Refresh indexes</button></div>
+        <div class="page-heading"><div><p class="eyebrow">SQLite event index</p><h1>Contracts</h1><p>Manage tracked contracts and query their in-memory SQLite index.</p></div><div class="actions"><button id="add-contract" type="button">Add contract</button><button id="refresh-contracts" class="secondary" type="button">Refresh indexes</button></div></div>
         <div id="contracts-alert" class="alert hidden" role="alert"></div>
-        <section class="card"><div class="card-heading"><div><h2>Indexed contracts</h2><p>Only these configured address/topic combinations can be queried.</p></div></div><div class="table-wrap"><table><thead><tr><th>Contract</th><th>Topic 0</th><th>Start block</th><th>Latest indexed</th><th>Transactions</th><th></th></tr></thead><tbody id="contracts-table"></tbody></table></div></section>
+        <div id="contracts-indexer-banner" class="sync-banner hidden" role="status"></div>
+        <section class="card"><div class="card-heading"><div><h2>Tracked contracts</h2><p>The list persists across restarts; indexed rows in tmpfs are rebuilt from Besu.</p></div></div><div class="table-wrap"><table><thead><tr><th>Name / contract</th><th>Status</th><th>Progress</th><th>Start / next block</th><th>Events</th><th>Transactions</th><th></th></tr></thead><tbody id="contracts-table"></tbody></table></div></section>
         <section class="card">
           <div class="card-heading"><div><h2>Event search</h2><p>Search the bounded SQLite index; no live historical scan is performed.</p></div></div>
           <form id="event-search" class="form-grid">
@@ -125,7 +127,24 @@
       </section>
     </main>
 
-    <dialog id="detail-dialog"><div class="dialog-heading"><div><p class="eyebrow" id="detail-type">Details</p><h2 id="detail-title">Result</h2></div><button id="close-dialog" class="icon-button" type="button" aria-label="Close">×</button></div><pre id="detail-content"></pre></dialog>
+    <dialog id="detail-dialog">
+      <div class="dialog-heading"><div><p class="eyebrow" id="detail-type">Details</p><h2 id="detail-title">Result</h2></div><button id="close-dialog" class="icon-button" type="button" aria-label="Close">×</button></div>
+      <div id="detail-tabs" class="detail-tabs hidden"><button type="button" data-detail-tab="overview" class="active">Overview</button><button type="button" data-detail-tab="raw">Raw JSON</button></div>
+      <div id="detail-overview" class="detail-overview hidden"></div>
+      <pre id="detail-content"></pre>
+    </dialog>
+    <dialog id="contract-dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">Indexer configuration</p><h2>Add tracked contract</h2></div><button id="close-contract-dialog" class="icon-button" type="button" aria-label="Close">×</button></div>
+      <p class="dialog-copy">The address is validated with <code>eth_getCode</code>. The indexer will backfill independently from the selected start block.</p>
+      <form id="add-contract-form" class="dialog-form">
+        <label>Name<input name="name" maxlength="80" placeholder="Settlement token" required></label>
+        <label>Contract address<input name="address" class="mono" placeholder="0x…" pattern="0x[0-9a-fA-F]{40}" required></label>
+        <label>Start block<input name="startBlock" type="number" min="0" step="1" value="0" required></label>
+        <label>Topic 0 allowlist (optional)<input name="topics" class="mono" placeholder="Comma-separated 0x… hashes"></label>
+        <label>Admin token (if configured)<input name="adminToken" type="password" autocomplete="off"></label>
+        <div class="dialog-actions"><button type="button" class="secondary" id="cancel-add-contract">Cancel</button><button type="submit">Add and index</button></div>
+      </form>
+    </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="/app.js" defer></script>
   </body>

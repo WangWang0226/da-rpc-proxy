@@ -125,6 +125,19 @@ final class SqliteStore {
                       PRIMARY KEY (chain_id, indexed_contract_address, transaction_hash)
                     )
                     """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS contract_checkpoints (
+                      chain_id TEXT NOT NULL,
+                      contract_address TEXT NOT NULL,
+                      start_block INTEGER NOT NULL,
+                      next_block INTEGER NOT NULL,
+                      last_block_hash TEXT,
+                      state TEXT NOT NULL,
+                      last_error TEXT,
+                      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      PRIMARY KEY (chain_id, contract_address)
+                    )
+                    """);
             statement.executeUpdate(
                     "CREATE INDEX IF NOT EXISTS event_logs_block_idx ON event_logs(chain_id, block_number, log_index)");
             statement.executeUpdate(
@@ -153,6 +166,7 @@ final class SqliteStore {
                         """);
             }
             statement.executeUpdate("INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)");
+            statement.executeUpdate("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)");
         } catch (SQLException exception) {
             throw new IllegalStateException("Cannot migrate SQLite database", exception);
         }
@@ -165,6 +179,65 @@ final class SqliteStore {
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? new Checkpoint(result.getLong(1), result.getString(2)) : null;
             }
+        } catch (SQLException exception) {
+            throw databaseError(exception);
+        }
+    }
+
+    ContractCheckpoint contractCheckpoint(String chainId, String address) {
+        String sql = """
+                SELECT start_block, next_block, last_block_hash, state, last_error, updated_at
+                FROM contract_checkpoints WHERE chain_id = ? AND contract_address = ?
+                """;
+        try (Connection connection = connection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, chainId);
+            statement.setString(2, address);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next()
+                        ? new ContractCheckpoint(
+                                result.getLong("start_block"),
+                                result.getLong("next_block"),
+                                result.getString("last_block_hash"),
+                                result.getString("state"),
+                                result.getString("last_error"),
+                                result.getString("updated_at"))
+                        : null;
+            }
+        } catch (SQLException exception) {
+            throw databaseError(exception);
+        }
+    }
+
+    void initializeContractCheckpoint(String chainId, String address, long startBlock) {
+        String sql = """
+                INSERT INTO contract_checkpoints
+                  (chain_id, contract_address, start_block, next_block, state)
+                VALUES (?, ?, ?, ?, 'initializing')
+                ON CONFLICT(chain_id, contract_address) DO NOTHING
+                """;
+        try (Connection connection = connection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, chainId);
+            statement.setString(2, address);
+            statement.setLong(3, startBlock);
+            statement.setLong(4, startBlock);
+            statement.executeUpdate();
+        } catch (SQLException exception) {
+            throw databaseError(exception);
+        }
+    }
+
+    void updateContractState(String chainId, String address, String state, String lastError) {
+        String sql = """
+                UPDATE contract_checkpoints
+                SET state = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE chain_id = ? AND contract_address = ?
+                """;
+        try (Connection connection = connection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, state);
+            statement.setString(2, lastError);
+            statement.setString(3, chainId);
+            statement.setString(4, address);
+            statement.executeUpdate();
         } catch (SQLException exception) {
             throw databaseError(exception);
         }
@@ -289,6 +362,46 @@ final class SqliteStore {
         }
     }
 
+    void persistContractBatch(
+            String chainId,
+            String address,
+            List<IndexedBlock> blocks,
+            List<IndexedLog> logs,
+            List<IndexedTransaction> transactions,
+            boolean caughtUp) {
+        if (blocks.isEmpty()) {
+            return;
+        }
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                insertBlocks(connection, chainId, blocks);
+                insertLogs(connection, chainId, logs);
+                insertTransactions(connection, chainId, transactions);
+                IndexedBlock last = blocks.getLast();
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE contract_checkpoints
+                        SET next_block = ?, last_block_hash = ?, state = ?, last_error = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE chain_id = ? AND contract_address = ?
+                        """)) {
+                    statement.setLong(1, last.number() + 1);
+                    statement.setString(2, last.hash());
+                    statement.setString(3, caughtUp ? "caught_up" : "backfilling");
+                    statement.setString(4, chainId);
+                    statement.setString(5, address);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (SQLException exception) {
+            throw databaseError(exception);
+        }
+    }
+
     void rollbackAfter(String chainId, long blockNumber) {
         try (Connection connection = connection()) {
             connection.setAutoCommit(false);
@@ -315,6 +428,122 @@ final class SqliteStore {
         } catch (SQLException exception) {
             throw databaseError(exception);
         }
+    }
+
+    void rollbackContractAfter(String chainId, String address, long blockNumber) {
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "DELETE FROM event_logs WHERE chain_id = ? AND address = ? AND block_number > ?")) {
+                    statement.setString(1, chainId);
+                    statement.setString(2, address);
+                    statement.setLong(3, blockNumber);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        DELETE FROM contract_transactions
+                        WHERE chain_id = ? AND indexed_contract_address = ? AND block_number > ?
+                        """)) {
+                    statement.setString(1, chainId);
+                    statement.setString(2, address);
+                    statement.setLong(3, blockNumber);
+                    statement.executeUpdate();
+                }
+                String hash = blockNumber < 0 ? null : blockHash(connection, chainId, blockNumber);
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE contract_checkpoints
+                        SET next_block = ?, last_block_hash = ?, state = 'backfilling', last_error = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE chain_id = ? AND contract_address = ?
+                        """)) {
+                    statement.setLong(1, blockNumber + 1);
+                    statement.setString(2, hash);
+                    statement.setString(3, chainId);
+                    statement.setString(4, address);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (SQLException exception) {
+            throw databaseError(exception);
+        }
+    }
+
+    void resetContract(String chainId, String address, long startBlock) {
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                deleteContractRows(connection, chainId, address);
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "DELETE FROM contract_filters WHERE chain_id = ? AND address = ?")) {
+                    statement.setString(1, chainId);
+                    statement.setString(2, address);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT INTO contract_checkpoints
+                          (chain_id, contract_address, start_block, next_block, state, last_block_hash, last_error)
+                        VALUES (?, ?, ?, ?, 'initializing', NULL, NULL)
+                        ON CONFLICT(chain_id, contract_address) DO UPDATE SET
+                          start_block = excluded.start_block,
+                          next_block = excluded.next_block,
+                          state = 'initializing',
+                          last_block_hash = NULL,
+                          last_error = NULL,
+                          updated_at = CURRENT_TIMESTAMP
+                        """)) {
+                    statement.setString(1, chainId);
+                    statement.setString(2, address);
+                    statement.setLong(3, startBlock);
+                    statement.setLong(4, startBlock);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (SQLException exception) {
+            throw databaseError(exception);
+        }
+    }
+
+    void removeContract(String chainId, String address, boolean purge) {
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                if (purge) {
+                    deleteContractRows(connection, chainId, address);
+                }
+                for (String table : List.of("contract_filters", "contract_checkpoints")) {
+                    try (PreparedStatement statement = connection.prepareStatement(
+                            "DELETE FROM " + table + " WHERE chain_id = ? AND "
+                                    + (table.equals("contract_filters") ? "address" : "contract_address") + " = ?")) {
+                        statement.setString(1, chainId);
+                        statement.setString(2, address);
+                        statement.executeUpdate();
+                    }
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (SQLException exception) {
+            throw databaseError(exception);
+        }
+    }
+
+    long eventCount(String chainId, String address) {
+        return count("event_logs", "address", chainId, address);
+    }
+
+    long transactionCount(String chainId, String address) {
+        return count("contract_transactions", "indexed_contract_address", chainId, address);
     }
 
     List<Map<String, Object>> findLogs(LogQuery query) {
@@ -539,6 +768,37 @@ final class SqliteStore {
         }
     }
 
+    private static void deleteContractRows(Connection connection, String chainId, String address)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "DELETE FROM event_logs WHERE chain_id = ? AND address = ?")) {
+            statement.setString(1, chainId);
+            statement.setString(2, address);
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                DELETE FROM contract_transactions
+                WHERE chain_id = ? AND indexed_contract_address = ?
+                """)) {
+            statement.setString(1, chainId);
+            statement.setString(2, address);
+            statement.executeUpdate();
+        }
+    }
+
+    private long count(String table, String addressColumn, String chainId, String address) {
+        String sql = "SELECT COUNT(*) FROM " + table + " WHERE chain_id = ? AND " + addressColumn + " = ?";
+        try (Connection connection = connection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, chainId);
+            statement.setString(2, address);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0;
+            }
+        } catch (SQLException exception) {
+            throw databaseError(exception);
+        }
+    }
+
     private static String blockHash(Connection connection, String chainId, long blockNumber) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT block_hash FROM indexed_blocks WHERE chain_id = ? AND block_number = ?")) {
@@ -606,6 +866,14 @@ final class SqliteStore {
     }
 
     record Checkpoint(long nextBlock, String lastBlockHash) {}
+
+    record ContractCheckpoint(
+            long startBlock,
+            long nextBlock,
+            String lastBlockHash,
+            String state,
+            String lastError,
+            String updatedAt) {}
 
     record IndexedBlock(long number, String hash, String parentHash, long timestamp) {}
 

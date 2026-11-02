@@ -1,170 +1,177 @@
 # Besu Etherscan-compatible proxy
 
-A small Java 21 service that exposes an allowlisted Blockscout/Etherscan
-`/api?module=...&action=...` interface and obtains blockchain state on demand
-from Besu JSON-RPC.
+A lightweight Java 21 service for a private Besu QBFT network. It exposes an
+allowlisted Blockscout/Etherscan `GET` or form-encoded `POST /api` interface,
+an internal operations explorer, and a bounded contract indexer. It does not
+require PostgreSQL, Redis, Spring, Node.js, or Elixir.
 
-It includes a bounded SQLite indexer for allowlisted contract events and
-top-level transactions. It has no PostgreSQL, Redis, ORM/framework, or signed
-transaction submission endpoint. SQLite JDBC is the only database runtime
-dependency.
+Current chain state comes directly from Besu JSON-RPC. Allowlisted contract
+events and top-level transactions are indexed in SQLite. In Docker, that
+SQLite database lives on a memory-backed tmpfs and is deliberately rebuilt
+after every container restart.
 
-## Run
+## Quick start with Docker
+
+Prerequisites: a running Besu node with HTTP JSON-RPC enabled and Docker
+Compose.
 
 ```sh
 cd standalone/besu-rpc-proxy
-./scripts/build.sh
-./scripts/run.sh
+cp .env.example .env
+# Edit .env, especially BESU_RPC_URL and the initial contract address.
+docker compose up --build -d
+docker compose ps
+docker compose logs -f app
 ```
 
-Defaults:
+If upgrading from the previous two-container `api` + `indexer` layout, remove
+those two project containers once before starting the new `app` service:
+
+```sh
+docker compose down --remove-orphans
+docker compose up --build -d
+```
+
+This command is scoped to the `besu-rpc-proxy` Compose project and does not
+stop or delete the separate Besu network. The former `indexer-data` volume is
+no longer mounted; it may be removed separately after confirming the migration.
+
+Open:
 
 - Explorer: <http://127.0.0.1:8080/>
-- Swagger/OpenAPI browser: <http://127.0.0.1:8080/swagger>
+- Swagger: <http://127.0.0.1:8080/swagger>
 - OpenAPI: <http://127.0.0.1:8080/openapi.json>
 - Postman: <http://127.0.0.1:8080/postman/besu-etherscan-compatible.postman_collection.json>
-- Besu: <http://127.0.0.1:8545>
 
-Example:
+Docker uses `http://host.docker.internal:8545` because `127.0.0.1` inside the
+app container points back to the app container, not to Besu on the Mac host.
+For a host-run JVM, the default remains `http://127.0.0.1:8545`.
+
+Besu should expose:
+
+```text
+--rpc-http-api=ETH,NET,ADMIN,TXPOOL,QBFT
+```
+
+Only `ETH` is required for public proxy calls and indexing. The other groups
+provide the internal Nodes and Validators pages.
+
+## Storage model
+
+Compose runs one `app` container with `SERVICE_MODE=all`:
+
+- `/data/indexer.sqlite`, `-wal`, and `-shm` are inside a size-limited tmpfs
+  (`256m` by default). They consume RAM, vanish when the container stops, and
+  are rebuilt from Besu using each contract's start block.
+- `/config/tracked-contracts.json` is on the small persistent
+  `contract-config` Docker volume. Contract names, addresses, enabled state,
+  topics, and start blocks survive restarts.
+- Besu chain data is not managed or deleted by this Compose project.
+
+To discard only the tracked-contract configuration and bootstrap it again from
+`.env`:
+
+```sh
+docker compose down
+docker volume rm besu-rpc-proxy_contract-config
+docker compose up --build -d
+```
+
+A normal `docker compose restart` already clears and rebuilds the tmpfs SQLite
+index. It does not affect a separately running `besu-test-network` project.
+
+## Contract tracking
+
+`INDEXER_CONTRACT_ADDRESSES` is a comma-separated bootstrap list used only when
+`tracked-contracts.json` does not yet exist:
+
+```dotenv
+INDEXER_CONTRACT_ADDRESSES=0xaf75636C88b9c70FbCE5a5d2772F7F6a8d56C132,0xAnotherAddress
+INDEXER_START_BLOCK=0
+```
+
+After the first start, use the Contracts page to add, pause/resume, reindex, or
+remove contracts without restarting the service. Each contract has an
+independent checkpoint, progress, and error state. New addresses are verified
+with `eth_getCode`. Reindexing deletes that contract's current RAM index and
+backfills it from the selected start block.
+
+Set `CONTRACT_ADMIN_TOKEN` to protect these internal mutations. The UI asks for
+the token and sends it as `X-Contract-Admin-Token`. Read-only internal pages and
+the Fireblocks API remain unaffected. In a real environment, also restrict the
+internal UI at the network or reverse-proxy layer.
+
+## Public API examples
 
 ```sh
 curl 'http://127.0.0.1:8080/api?module=account&action=balance&address=0x...&tag=latest'
 curl 'http://127.0.0.1:8080/api?module=proxy&action=eth_getTransactionCount&address=0x...&tag=pending'
 curl 'http://127.0.0.1:8080/api?module=proxy&action=eth_gasPrice'
 curl 'http://127.0.0.1:8080/api?module=logs&action=getLogs&fromBlock=0&toBlock=latest&address=0x...'
-curl 'http://127.0.0.1:8080/api?module=logs&action=getIndexedContracts'
 curl 'http://127.0.0.1:8080/api?module=account&action=txlist&address=0x...&startblock=0&endblock=latest&page=1&offset=25&sort=desc'
 ```
 
-Both GET query parameters and POST `application/x-www-form-urlencoded` fields
-are supported on `/api`.
+The upstream Besu URL is server configuration. API callers cannot choose an
+arbitrary node or arbitrary JSON-RPC method.
+
+## Internal UI
+
+- **Explorer**: latest 5 blocks by default, up to 20 transactions, 15-second
+  refresh, exact decimal transaction quantities, local and UTC timestamps, and
+  raw JSON.
+- **Nodes**: read-only node, peer, and transaction-pool status.
+- **Validators**: read-only QBFT validators and pending votes.
+- **Contracts**: persistent tracking configuration, per-contract sync status,
+  event search, and indexed contract transactions.
+- **API Console**: editable parameters, exact request URL, and live response
+  for every supported public endpoint.
+
+The Explorer and Contracts pages display a sync banner because results can be
+incomplete while tmpfs SQLite is rebuilding.
 
 ## Configuration
 
-| Environment variable | Default |
-| --- | --- |
-| `HTTP_HOST` | `127.0.0.1` |
-| `HTTP_PORT` | `8080` |
-| `BESU_RPC_URL` | `http://127.0.0.1:8545` |
-| `BESU_NODES_CONFIG` | unset; optional path to a multi-node JSON file used by the internal UI |
-| `BESU_RPC_TIMEOUT_MS` | `5000` |
-| `SERVICE_MODE` | `api` (`api`, `indexer`, or `all`) |
-| `SQLITE_PATH` | `./data/indexer.sqlite` |
-| `INDEXER_CONTRACT_ADDRESSES` | required in indexer mode; comma-separated |
-| `INDEXER_TOPIC0` | empty; optional comma-separated event signature hashes |
-| `INDEXER_START_BLOCK` | unset; begin after current safe head on first run |
-| `INDEXER_CONFIRMATIONS` | `0` |
-| `INDEXER_BATCH_SIZE` | `500` |
-| `INDEXER_POLL_INTERVAL_MS` | `2000` |
-| `INDEXER_REORG_LOOKBACK` | `128` |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SERVICE_MODE` | `api` in Java; `all` in Compose | `api`, `indexer`, or `all` |
+| `HTTP_HOST` / `HTTP_PORT` | `127.0.0.1` / `8080` | HTTP bind address |
+| `BESU_RPC_URL` | `http://127.0.0.1:8545` | Canonical Besu RPC endpoint |
+| `BESU_RPC_TIMEOUT_MS` | `5000` | Upstream timeout |
+| `BESU_NODES_CONFIG` | unset | Optional internal-UI node registry |
+| `SQLITE_PATH` | `./data/indexer.sqlite` | SQLite path; Compose fixes it to `/data/indexer.sqlite` |
+| `CONTRACT_CONFIG_PATH` | `./data/tracked-contracts.json` | Persistent tracking configuration |
+| `CONTRACT_ADMIN_TOKEN` | empty | Optional mutation token |
+| `INDEXER_CONTRACT_ADDRESSES` | empty | First-run comma-separated bootstrap addresses |
+| `INDEXER_TOPIC0` | empty | First-run event topic allowlist |
+| `INDEXER_START_BLOCK` | `0` in Compose | First-run decimal start block |
+| `INDEXER_CONFIRMATIONS` | `0` | Lag behind the chain head |
+| `INDEXER_BATCH_SIZE` | `500` | Blocks per contract per poll |
+| `INDEXER_POLL_INTERVAL_MS` | `2000` | Poll delay |
+| `INDEXER_REORG_LOOKBACK` | `128` | Automatic reorg search depth |
+| `SQLITE_TMPFS_SIZE` | `256m` | Maximum tmpfs filesystem size |
+| `CONTAINER_MEMORY_LIMIT` | `1g` | Container memory limit |
+| `JAVA_TOOL_OPTIONS` | `-Xms128m -Xmx384m` | JVM heap sizing |
 
-The upstream URL is fixed by service configuration. API callers cannot select
-or override the Besu node.
+Compose automatically reads `.env`; direct `./scripts/run.sh` execution does
+not, so host-run variables must be exported or supplied inline.
 
-## Internal operations UI
-
-The browser UI has five tabs:
-
-- **Explorer** reads the latest 5 blocks by default, collects up to 20 recent
-  transactions, and refreshes every 15 seconds. Lookback can be changed to 10,
-  20, or 30 blocks.
-- **Nodes** reads node identity, peers, and transaction-pool state.
-- **Validators** reads the current QBFT validators and pending votes. It never
-  submits validator votes.
-- **Contracts** lists configured SQLite indexes, searches events, and lists
-  indexed top-level transactions with receipt status and gas usage.
-- **API Console** provides an editable form for every supported public action,
-  displays the exact request URL, and renders the live response.
-
-Explorer aggregation uses a five-second, disposable in-memory cache. Nodes and
-Validators call Besu live. Their `/internal/ui/*` routes are deliberately not
-part of the public OpenAPI or Postman collection.
-
-For a single node, no extra configuration is needed. For multiple UI-selectable
-nodes, copy `config/nodes.example.json`, edit the endpoints, and set:
+## Host development and verification
 
 ```sh
-BESU_NODES_CONFIG=./config/nodes.json ./scripts/run.sh
-```
-
-The first node is selected by default. Browser callers can select only a node
-defined in this server-side file; they cannot supply an arbitrary RPC URL.
-
-Besu must expose `ETH` for Explorer, `NET`, `ADMIN`, and `TXPOOL` for the Nodes
-page, and `QBFT` for Validators. Optional node fields display as unavailable if
-their API is disabled. For example:
-
-```text
---rpc-http-api=ETH,NET,ADMIN,TXPOOL,QBFT
-```
-
-When Docker is used, mount the configuration file into the API container and
-set `BESU_NODES_CONFIG` to its in-container path. The indexer still follows the
-single canonical `BESU_RPC_URL`.
-
-## Run API and indexer with Docker
-
-The same image runs as two services. The indexer is the only SQLite writer;
-the API opens the WAL database for reads.
-
-Both Compose services use the `besu-rpc-proxy:local` image. The Dockerfile
-uses a BuildKit cache for the Gradle wrapper and dependencies, so the first
-build downloads the Java toolchain dependencies while later source-only builds
-reuse them. Docker Compose automatically reads a `.env` file from this project
-directory for variable interpolation.
-
-```sh
-cp .env.example .env
-# Edit .env if the Besu URL, contract allowlist, or start block differs.
-docker compose up --build -d
-docker compose ps
-docker compose logs -f indexer
-```
-
-You do not need to run `export` before each Docker Compose command when `.env`
-exists in this directory. This applies to Docker Compose only: the standalone
-`./scripts/run.sh` process does not parse dotenv files, so host-based execution
-still requires exported variables or inline assignments.
-
-The default example monitors
-`0xaf75636C88b9c70FbCE5a5d2772F7F6a8d56C132` from block 0. The first indexer
-run stores a durable checkpoint. Changing `INDEXER_START_BLOCK` later does not
-rewind an existing database.
-
-To delete only this project's SQLite database and start a clean backfill while
-leaving a separately running `besu-test-network` project untouched:
-
-```sh
-docker compose down
-docker volume rm besu-rpc-proxy_indexer-data
-docker compose up --build -d
-```
-
-`docker compose down` temporarily stops only this project's API and indexer.
-The named volume removal permanently deletes their SQLite index and checkpoint;
-it does not delete Besu chain data or volumes owned by another Compose project.
-
-For host-based development, start both roles in one JVM:
-
-```sh
+./scripts/build.sh
 SERVICE_MODE=all \
 INDEXER_CONTRACT_ADDRESSES=0xYourContractAddress \
 INDEXER_START_BLOCK=0 \
 ./scripts/run.sh
-```
 
-## Verification
-
-```sh
 ./scripts/test.sh
 ```
 
-The integration suite uses an in-process fake Besu server and covers the
-module/action dispatcher, event and allowlisted contract-transaction indexing,
-response envelopes, internal UI aggregations, Swagger resources, and Postman
-download. See `docs/api-support-matrix.md` for the complete support boundary.
+The integration suite uses an in-process fake Besu and covers public API
+dispatch, SQLite migration/indexing, internal UI aggregation, contract
+management authorization, and static documentation resources.
 
-## Architecture documentation
+## Documentation
 
 - [Architecture overview](docs/architecture-overview.md)
 - [API support matrix](docs/api-support-matrix.md)

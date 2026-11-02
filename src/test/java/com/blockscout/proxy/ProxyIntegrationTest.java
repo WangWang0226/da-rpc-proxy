@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 public final class ProxyIntegrationTest {
     private static final String ADDRESS = "0x" + "1".repeat(40);
     private static final String CONTRACT = "0x" + "2".repeat(40);
+    private static final String SECOND_CONTRACT = "0x" + "3".repeat(40);
     private static final String TRANSACTION_HASH = "0x" + "a".repeat(64);
     private static final String BLOCK_HASH = "0x" + "b".repeat(64);
     private static final String PARENT_HASH = "0x" + "c".repeat(64);
@@ -35,14 +36,21 @@ public final class ProxyIntegrationTest {
                 FakeBesu besu = new FakeBesu(executor)) {
             BesuClient client = new BesuClient(besu.uri(), Duration.ofSeconds(2));
             Path database = Files.createTempFile("besu-indexer-test-", ".sqlite");
-            SqliteStore store = indexedStoreFromBesu(client, database);
-            ProxyServer proxy = new ProxyServer(new InetSocketAddress("127.0.0.1", 0), client, store);
+            IndexedFixture fixture = indexedStoreFromBesu(client, database);
+            NodeRegistry nodes = NodeRegistry.single("primary", client.endpoint(), client);
+            ProxyServer proxy = new ProxyServer(
+                    new InetSocketAddress("127.0.0.1", 0),
+                    client,
+                    fixture.store(),
+                    new InternalUiService(nodes, fixture.indexer(), fixture.trackedContracts(), fixture.store()),
+                    "test-secret");
             proxy.start(executor);
             try {
                 runTests(proxy.port());
             } finally {
                 proxy.stop();
                 Files.deleteIfExists(database);
+                Files.deleteIfExists(Path.of(database + ".contracts.json"));
             }
         }
         System.out.println("All proxy integration tests passed");
@@ -79,6 +87,14 @@ public final class ProxyIntegrationTest {
         assertResponse(http, port, "/internal/ui/nodes/status?node=primary", 200, "Besu/v24.1.0");
         assertResponse(http, port, "/internal/ui/nodes/status?node=primary", 200, "\"peerCount\":2");
         assertResponse(http, port, "/internal/ui/validators?node=primary", 200, ADDRESS);
+        assertResponse(http, port, "/internal/ui/indexer/status", 200, "\"state\":\"caught_up\"");
+        assertResponse(http, port, "/internal/ui/contracts", 200, "\"eventCount\":1");
+        assertResponse(
+                http,
+                port,
+                "/internal/ui/transaction?node=primary&hash=" + TRANSACTION_HASH,
+                200,
+                "\"effectiveGasPrice\":\"0x7\"");
 
         assertResponse(http, port, "/api?module=account&action=balance&address=" + ADDRESS, 200, "1000000000000000000");
         assertResponse(http, port, "/api?module=account&action=balancemulti&address=" + ADDRESS + "," + CONTRACT, 200, "\"stale\":false");
@@ -120,9 +136,39 @@ public final class ProxyIntegrationTest {
         assertResponse(http, port, "/api?module=proxy&action=unknown", 200, "Unsupported module/action");
         assertResponse(http, port, "/api/v2/blocks/latest", 404, "Endpoint not supported");
         assertFormPost(http, port, "module=proxy&action=eth_chainId", "\"result\":\"0x539\"");
+        assertJsonMutation(
+                http,
+                port,
+                "POST",
+                "/internal/ui/contracts",
+                "{\"name\":\"Second contract\",\"address\":\"" + SECOND_CONTRACT
+                        + "\",\"startBlock\":0,\"topics\":[]}",
+                null,
+                401,
+                "Invalid contract administration token");
+        assertJsonMutation(
+                http,
+                port,
+                "POST",
+                "/internal/ui/contracts",
+                "{\"name\":\"Second contract\",\"address\":\"" + SECOND_CONTRACT
+                        + "\",\"startBlock\":0,\"topics\":[]}",
+                "test-secret",
+                200,
+                "Second contract");
+        assertResponse(http, port, "/internal/ui/contracts", 200, SECOND_CONTRACT);
+        assertJsonMutation(
+                http,
+                port,
+                "PATCH",
+                "/internal/ui/contracts/" + SECOND_CONTRACT,
+                "{\"enabled\":false}",
+                "test-secret",
+                200,
+                "\"enabled\":false");
     }
 
-    private static SqliteStore indexedStoreFromBesu(BesuClient client, Path database) throws InterruptedException {
+    private static IndexedFixture indexedStoreFromBesu(BesuClient client, Path database) throws InterruptedException {
         prepareVersionTwoDatabase(database);
         SqliteStore store = new SqliteStore(database);
         Configuration configuration = new Configuration(
@@ -132,6 +178,8 @@ public final class ProxyIntegrationTest {
                 URI.create("http://127.0.0.1:8545"),
                 Duration.ofSeconds(2),
                 database,
+                Path.of(database + ".contracts.json"),
+                "",
                 Duration.ofSeconds(1),
                 100,
                 0,
@@ -139,8 +187,14 @@ public final class ProxyIntegrationTest {
                 16,
                 List.of(CONTRACT),
                 List.of());
-        new EventIndexer(client, store, configuration).pollOnce();
-        return store;
+        TrackedContractStore trackedContracts = new TrackedContractStore(
+                configuration.contractConfigPath(),
+                configuration.addresses(),
+                configuration.topic0Values(),
+                configuration.startBlock());
+        EventIndexer indexer = new EventIndexer(client, store, configuration, trackedContracts);
+        indexer.pollOnce();
+        return new IndexedFixture(store, indexer, trackedContracts);
     }
 
     private static void prepareVersionTwoDatabase(Path database) {
@@ -200,6 +254,29 @@ public final class ProxyIntegrationTest {
         }
     }
 
+    private static void assertJsonMutation(
+            HttpClient http,
+            int port,
+            String method,
+            String path,
+            String json,
+            String adminToken,
+            int expectedStatus,
+            String expectedBodyFragment)
+            throws IOException, InterruptedException {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .header("Content-Type", "application/json")
+                .method(method, HttpRequest.BodyPublishers.ofString(json));
+        if (adminToken != null) {
+            builder.header("X-Contract-Admin-Token", adminToken);
+        }
+        HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(expectedStatus, response.statusCode(), method + " " + path + " status");
+        if (!response.body().contains(expectedBodyFragment)) {
+            throw new AssertionError(path + " response did not contain " + expectedBodyFragment + ": " + response.body());
+        }
+    }
+
     private static void assertFormPost(HttpClient http, int port, String form, String expectedBodyFragment)
             throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api"))
@@ -251,7 +328,7 @@ public final class ProxyIntegrationTest {
                 case "eth_blockNumber" -> "0x10";
                 case "eth_getBalance" -> "0xde0b6b3a7640000";
                 case "eth_getTransactionCount" -> "0x2";
-                case "eth_getCode" -> CONTRACT.equals(params.get(0)) ? "0x6000" : "0x";
+                case "eth_getCode" -> List.of(CONTRACT, SECOND_CONTRACT).contains(params.get(0)) ? "0x6000" : "0x";
                 case "eth_gasPrice" -> "0x7";
                 case "eth_maxPriorityFeePerGas" -> "0x2";
                 case "eth_estimateGas" -> "0x100000";
@@ -368,4 +445,7 @@ public final class ProxyIntegrationTest {
             server.stop(0);
         }
     }
+
+    private record IndexedFixture(
+            SqliteStore store, EventIndexer indexer, TrackedContractStore trackedContracts) {}
 }

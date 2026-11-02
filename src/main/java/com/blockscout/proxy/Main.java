@@ -12,10 +12,16 @@ public final class Main {
         Configuration configuration = Configuration.fromEnvironment();
         BesuClient client = new BesuClient(configuration.besuUrl(), configuration.besuTimeout());
         SqliteStore store = new SqliteStore(configuration.databasePath());
+        TrackedContractStore trackedContracts = new TrackedContractStore(
+                configuration.contractConfigPath(),
+                configuration.addresses(),
+                configuration.topic0Values(),
+                configuration.startBlock());
         List<AutoCloseable> services = new ArrayList<>();
+        EventIndexer indexer = null;
 
         if (configuration.indexerEnabled()) {
-            EventIndexer indexer = new EventIndexer(client, store, configuration);
+            indexer = new EventIndexer(client, store, configuration, trackedContracts);
             indexer.start();
             services.add(indexer);
             System.out.printf("Event indexer started with SQLite at %s%n", configuration.databasePath());
@@ -27,7 +33,8 @@ public final class Main {
                     new InetSocketAddress(configuration.httpHost(), configuration.httpPort()),
                     client,
                     store,
-                    new InternalUiService(nodeRegistry));
+                    new InternalUiService(nodeRegistry, indexer, trackedContracts, store),
+                    configuration.contractAdminToken());
             server.start(Executors.newVirtualThreadPerTaskExecutor());
             services.add(server::stop);
             System.out.printf(

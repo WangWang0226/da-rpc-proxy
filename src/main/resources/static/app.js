@@ -1,4 +1,4 @@
-const state = { node: "", lookback: 5, autoRefresh: true, timer: null, page: "explorer" };
+const state = { node: "", lookback: 5, autoRefresh: true, timer: null, page: "explorer", adminToken: "" };
 const $ = (selector) => document.querySelector(selector);
 const parameter = (name, label, value = "", required = false, options = null) => ({ name, label, value, required, options });
 const ADDRESS = parameter("address", "Address", "0x0000000000000000000000000000000000000000", true);
@@ -77,6 +77,28 @@ function numberText(value) {
   return parsed === null || !Number.isFinite(parsed) ? "—" : parsed.toLocaleString();
 }
 
+function exactQuantity(value) {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === "string" && /^0x[0-9a-f]+$/i.test(value)) return BigInt(value);
+  if (typeof value === "string" && /^\d+$/.test(value)) return BigInt(value);
+  return null;
+}
+
+function exactNumberText(value) {
+  const parsed = exactQuantity(value);
+  return parsed === null ? "—" : parsed.toLocaleString();
+}
+
+function formatUnits(value, decimals) {
+  const amount = exactQuantity(value);
+  if (amount === null) return "—";
+  const scale = 10n ** BigInt(decimals);
+  const whole = amount / scale;
+  const fraction = (amount % scale).toString().padStart(decimals, "0").replace(/0+$/, "").slice(0, 8);
+  return `${whole.toLocaleString()}${fraction ? `.${fraction}` : ""}`;
+}
+
 function relativeTime(hexTimestamp) {
   const timestamp = quantity(hexTimestamp);
   if (timestamp === null) return "—";
@@ -100,7 +122,82 @@ function showDetails(type, title, value) {
   $("#detail-type").textContent = type;
   $("#detail-title").textContent = title;
   $("#detail-content").textContent = JSON.stringify(value, null, 2);
+  $("#detail-tabs").classList.add("hidden");
+  $("#detail-overview").classList.add("hidden");
+  $("#detail-content").classList.remove("hidden");
   $("#detail-dialog").showModal();
+}
+
+function detailField(label, value, hint = "", wide = false) {
+  const field = document.createElement("div");
+  field.className = `detail-field${wide ? " wide" : ""}`;
+  const name = document.createElement("span"); name.textContent = label;
+  const content = document.createElement("strong"); content.textContent = value ?? "—";
+  field.append(name, content);
+  if (hint) { const secondary = document.createElement("small"); secondary.textContent = hint; field.append(secondary); }
+  return field;
+}
+
+function showTransactionDetails(hash, payload) {
+  const tx = payload.transaction || {};
+  const receipt = payload.receipt || {};
+  const block = payload.block || {};
+  const timestamp = exactQuantity(block.timestamp ?? tx.blockTimestamp);
+  const date = timestamp === null ? null : new Date(Number(timestamp * 1000n));
+  const gasPrice = receipt.effectiveGasPrice ?? tx.gasPrice ?? tx.maxFeePerGas;
+  const gasUsed = receipt.gasUsed;
+  const totalFee = exactQuantity(gasPrice) !== null && exactQuantity(gasUsed) !== null
+    ? exactQuantity(gasPrice) * exactQuantity(gasUsed) : null;
+  const latestBlock = exactQuantity(payload.latestBlock);
+  const transactionBlock = exactQuantity(tx.blockNumber);
+  const input = tx.input || "0x";
+  const fields = [
+    detailField("Status", receipt.status === "0x1" ? "Success" : receipt.status === "0x0" ? "Failed" : "Pending"),
+    detailField("Block", exactNumberText(tx.blockNumber), tx.blockNumber || ""),
+    detailField("Timestamp", timestamp === null ? "—" : `${timestamp.toLocaleString()} Unix seconds`, date ? `${date.toLocaleString()} · ${date.toISOString()}` : ""),
+    detailField("Confirmations", transactionBlock === null || latestBlock === null ? "Pending" : exactNumberText(latestBlock - transactionBlock + 1n)),
+    detailField("From", tx.from || "—", "", true),
+    detailField("To / created contract", tx.to || receipt.contractAddress || "Contract creation", "", true),
+    detailField("Nonce", exactNumberText(tx.nonce), tx.nonce || ""),
+    detailField("Transaction index", exactNumberText(tx.transactionIndex), tx.transactionIndex || ""),
+    detailField("Chain ID", exactNumberText(tx.chainId), tx.chainId || ""),
+    detailField("Type", exactNumberText(tx.type), tx.type || ""),
+    detailField("Gas limit", exactNumberText(tx.gas), tx.gas || ""),
+    detailField("Gas used", exactNumberText(gasUsed), gasUsed || ""),
+    detailField("Gas price", `${exactNumberText(gasPrice)} wei`, `${formatUnits(gasPrice, 9)} Gwei`),
+    detailField("Max fee per gas", `${exactNumberText(tx.maxFeePerGas)} wei`, `${formatUnits(tx.maxFeePerGas, 9)} Gwei`),
+    detailField("Priority fee", `${exactNumberText(tx.maxPriorityFeePerGas)} wei`, `${formatUnits(tx.maxPriorityFeePerGas, 9)} Gwei`),
+    detailField("Total transaction fee", totalFee === null ? "—" : `${totalFee.toLocaleString()} wei`, totalFee === null ? "" : `${formatUnits(totalFee, 18)} native`),
+    detailField("Value", `${exactNumberText(tx.value)} wei`, `${formatUnits(tx.value, 18)} native`),
+    detailField("Input data", input.length > 180 ? `${input.slice(0, 180)}… (${Math.max(0, (input.length - 2) / 2).toLocaleString()} bytes)` : input, "", true),
+  ];
+  $("#detail-type").textContent = "Transaction details";
+  $("#detail-title").textContent = hash;
+  $("#detail-overview").replaceChildren(...fields);
+  $("#detail-content").textContent = JSON.stringify(payload, null, 2);
+  $("#detail-tabs").classList.remove("hidden");
+  selectDetailTab("overview");
+  $("#detail-dialog").showModal();
+}
+
+function selectDetailTab(tab) {
+  document.querySelectorAll("[data-detail-tab]").forEach((button) => button.classList.toggle("active", button.dataset.detailTab === tab));
+  $("#detail-overview").classList.toggle("hidden", tab !== "overview");
+  $("#detail-content").classList.toggle("hidden", tab !== "raw");
+}
+
+async function loadTransactionDetails(hash) {
+  try {
+    const payload = await getJson(endpoint("/internal/ui/transaction", { node: state.node, hash }));
+    showTransactionDetails(hash, payload);
+  } catch (error) { toast(error.message, true); }
+}
+
+function transactionLink(text, hash) {
+  const button = document.createElement("button");
+  button.type = "button"; button.className = "text-link mono"; button.textContent = text; button.title = hash;
+  button.addEventListener("click", () => loadTransactionDetails(hash));
+  return button;
 }
 
 function statusBadge(status) {
@@ -146,6 +243,7 @@ async function refreshExplorer() {
     $("#last-updated").textContent = new Date(data.fetchedAt).toLocaleTimeString();
     renderBlocks(data.blocks || []);
     renderTransactions(data.transactions || []);
+    refreshIndexerStatus();
     $("#connection-dot").className = "connection-dot connected";
   } catch (error) {
     setAlert("#explorer-alert", error);
@@ -176,7 +274,7 @@ function renderTransactions(transactions) {
   if (!transactions.length) { setLoading($("#transactions-table"), 6, "No transactions in the selected blocks."); return; }
   $("#transactions-table").replaceChildren(...transactions.map((tx) => {
     const row = document.createElement("tr");
-    const hash = document.createElement("td"); hash.append(linkButton(short(tx.hash), tx.hash, tx, "Transaction details"));
+    const hash = document.createElement("td"); hash.append(transactionLink(short(tx.hash), tx.hash));
     const block = document.createElement("td"); block.textContent = numberText(tx.blockNumber);
     const from = document.createElement("td"); from.className = "mono"; from.textContent = short(tx.from);
     const to = document.createElement("td"); to.className = "mono"; to.textContent = short(tx.to || tx.contractAddress || "Contract creation");
@@ -253,26 +351,118 @@ async function refreshValidators() {
 
 async function refreshContracts() {
   setAlert("#contracts-alert", null);
-  setLoading($("#contracts-table"), 6);
+  setLoading($("#contracts-table"), 7);
   try {
-    const body = await getJson("/api?module=logs&action=getIndexedContracts");
-    const contracts = Array.isArray(body.result) ? body.result : [];
-    if (!contracts.length) { setLoading($("#contracts-table"), 6, "No index filters configured."); return; }
+    const body = await getJson("/internal/ui/contracts");
+    renderIndexerBanner(body);
+    const contracts = Array.isArray(body.contracts) ? body.contracts : [];
+    if (!contracts.length) { setLoading($("#contracts-table"), 7, "No tracked contracts. Add one to begin indexing."); return; }
     $("#contracts-table").replaceChildren(...contracts.map((contract) => {
       const row = document.createElement("tr");
-      const address = document.createElement("td"); address.className = "mono"; address.textContent = contract.address;
-      const topic = document.createElement("td"); topic.className = "mono"; topic.textContent = short(contract.topic0 || "All topics", 12, 8);
-      const start = document.createElement("td"); start.textContent = contract.startBlock;
-      const latest = document.createElement("td"); latest.textContent = contract.latestIndexedBlock ?? "Waiting";
-      const count = document.createElement("td"); count.textContent = Number(contract.transactionCount || 0).toLocaleString();
+      const identity = document.createElement("td");
+      const name = document.createElement("strong"); name.className = "contract-name"; name.textContent = contract.name;
+      const address = document.createElement("span"); address.className = "contract-address mono"; address.textContent = contract.address;
+      identity.append(name, address);
+      const status = document.createElement("td"); status.append(indexerStateBadge(contract.enabled ? contract.state : "paused"));
+      const progress = document.createElement("td");
+      const track = document.createElement("div"); track.className = "progress-track";
+      const fill = document.createElement("span"); fill.style.width = `${Math.max(0, Math.min(100, Number(contract.progress || 0)))}%`; track.append(fill);
+      const progressLabel = document.createElement("span"); progressLabel.className = "progress-label"; progressLabel.textContent = `${Number(contract.progress || 0).toFixed(1)}%`;
+      progress.append(track, progressLabel);
+      const blocks = document.createElement("td"); blocks.textContent = `${exactNumberText(contract.startBlock)} / ${exactNumberText(contract.nextBlock)}`;
+      const eventsCount = document.createElement("td"); eventsCount.textContent = exactNumberText(contract.eventCount || 0);
+      const transactionCount = document.createElement("td"); transactionCount.textContent = exactNumberText(contract.transactionCount || 0);
       const action = document.createElement("td"); action.className = "row-actions";
       const events = document.createElement("button"); events.type = "button"; events.className = "text-link"; events.textContent = "Events";
-      events.addEventListener("click", () => { const form = $("#event-search"); form.elements.address.value = contract.address; form.elements.topic0.value = contract.topic0 || ""; form.scrollIntoView({ behavior: "smooth" }); });
+      events.addEventListener("click", () => { const form = $("#event-search"); form.elements.address.value = contract.address; form.elements.topic0.value = contract.topics?.[0] || ""; form.scrollIntoView({ behavior: "smooth" }); });
       const transactions = document.createElement("button"); transactions.type = "button"; transactions.className = "text-link"; transactions.textContent = "Transactions";
       transactions.addEventListener("click", () => { const form = $("#contract-transactions-search"); form.elements.address.value = contract.address; form.scrollIntoView({ behavior: "smooth" }); form.requestSubmit(); });
-      action.append(events, transactions); row.append(address, topic, start, latest, count, action); return row;
+      const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "text-link"; toggle.textContent = contract.enabled ? "Pause" : "Resume";
+      toggle.addEventListener("click", () => mutateContract(`/internal/ui/contracts/${contract.address}`, "PATCH", { enabled: !contract.enabled }));
+      const reindex = document.createElement("button"); reindex.type = "button"; reindex.className = "text-link"; reindex.textContent = "Reindex";
+      reindex.addEventListener("click", () => reindexContract(contract));
+      const remove = document.createElement("button"); remove.type = "button"; remove.className = "text-link"; remove.textContent = "Remove";
+      remove.addEventListener("click", () => removeContract(contract));
+      action.append(events, transactions, toggle, reindex, remove);
+      row.append(identity, status, progress, blocks, eventsCount, transactionCount, action); return row;
     }));
-  } catch (error) { setAlert("#contracts-alert", error); setLoading($("#contracts-table"), 6, "Could not load indexes."); }
+  } catch (error) { setAlert("#contracts-alert", error); setLoading($("#contracts-table"), 7, "Could not load indexes."); }
+}
+
+function indexerStateBadge(stateValue) {
+  const badge = document.createElement("span");
+  const normalized = stateValue || "initializing";
+  badge.className = `status-badge ${normalized === "caught_up" ? "success" : normalized === "error" ? "failed" : "pending"}`;
+  badge.textContent = normalized.replaceAll("_", " ");
+  return badge;
+}
+
+async function refreshIndexerStatus() {
+  try { renderIndexerBanner(await getJson("/internal/ui/indexer/status")); }
+  catch (_) { /* Explorer RPC data remains usable while the indexer status is unavailable. */ }
+}
+
+function renderIndexerBanner(status) {
+  const text = status.state === "caught_up"
+    ? `Indexer caught up at block ${exactNumberText(status.safeHead)}. SQLite data is ephemeral and will rebuild after restart.`
+    : status.state === "error"
+      ? `Indexer error: ${status.lastError || "see contract status"}`
+      : `Indexer ${String(status.state || "initializing").replaceAll("_", " ")} · safe head ${exactNumberText(status.safeHead)}. Historical results may be incomplete.`;
+  [$("#explorer-indexer-banner"), $("#contracts-indexer-banner")].forEach((banner) => {
+    banner.textContent = text;
+    banner.className = `sync-banner ${status.state === "caught_up" ? "caught-up" : status.state === "error" ? "error" : ""}`;
+  });
+}
+
+async function mutateContract(path, method, body, mayRequestToken = true) {
+  try {
+    const headers = { Accept: "application/json", "Content-Type": "application/json" };
+    if (state.adminToken) headers["X-Contract-Admin-Token"] = state.adminToken;
+    const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const result = await response.json();
+    if (response.status === 401 && mayRequestToken) {
+      const token = window.prompt("Contract administration token:");
+      if (token === null) throw new Error("Administration token is required");
+      state.adminToken = token;
+      return mutateContract(path, method, body, false);
+    }
+    if (!response.ok) throw new Error(result.message || `Request failed (${response.status})`);
+    toast("Contract configuration updated");
+    await refreshContracts();
+    return result;
+  } catch (error) { toast(error.message, true); throw error; }
+}
+
+async function submitContract(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = Object.fromEntries(new FormData(form));
+  state.adminToken = values.adminToken || state.adminToken;
+  const topics = values.topics.trim() ? values.topics.split(",").map((topic) => topic.trim()).filter(Boolean) : [];
+  try {
+    await mutateContract("/internal/ui/contracts", "POST", {
+      name: values.name.trim(),
+      address: values.address.trim(),
+      startBlock: Number(values.startBlock),
+      topics,
+    });
+    $("#contract-dialog").close();
+    form.reset();
+    form.elements.startBlock.value = "0";
+  } catch (_) { /* Error toast is shown by mutateContract. */ }
+}
+
+async function reindexContract(contract) {
+  const raw = window.prompt(`Reindex ${contract.name} from block:`, String(contract.startBlock));
+  if (raw === null) return;
+  if (!/^\d+$/.test(raw)) { toast("Start block must be a non-negative integer", true); return; }
+  await mutateContract(`/internal/ui/contracts/${contract.address}/reindex`, "POST", { startBlock: Number(raw) });
+}
+
+async function removeContract(contract) {
+  if (!window.confirm(`Stop tracking ${contract.name}? Indexed RAM data will be kept until restart unless you also purge it.`)) return;
+  const purge = window.confirm("Also purge this contract's currently indexed events and transactions?");
+  await mutateContract(`/internal/ui/contracts/${contract.address}?purge=${purge}`, "DELETE");
 }
 
 async function searchContractTransactions(event) {
@@ -294,7 +484,7 @@ async function searchContractTransactions(event) {
       const to = document.createElement("td"); to.className = "mono"; to.textContent = short(transaction.to || transaction.contractAddress || "Contract creation");
       const status = document.createElement("td"); status.append(statusBadge(transaction.txreceipt_status === "1" ? "0x1" : "0x0"));
       const gas = document.createElement("td"); gas.textContent = numberText(transaction.gasUsed);
-      const action = document.createElement("td"); action.append(linkButton("Details", transaction.hash, transaction, "Indexed transaction"));
+      const action = document.createElement("td"); action.append(transactionLink("Details", transaction.hash));
       row.append(hash, block, age, from, to, status, gas, action); return row;
     }));
   } catch (error) { setLoading($("#contract-transactions-table"), 8, error.message); }
@@ -334,7 +524,7 @@ async function searchBlock(event) {
 async function searchTransaction(event) {
   event.preventDefault();
   const hash = $("#transaction-query").value.trim();
-  await searchPublic(endpoint("/api", { module: "proxy", action: "eth_getTransactionByHash", txhash: hash }), "Transaction details", hash);
+  await loadTransactionDetails(hash);
 }
 
 async function searchPublic(path, type, title) {
@@ -447,7 +637,11 @@ function navigate(page) {
 
 function scheduleRefresh() {
   window.clearInterval(state.timer);
-  state.timer = state.autoRefresh ? window.setInterval(() => { if (state.page === "explorer" && !document.hidden) refreshExplorer(); }, 15000) : null;
+  state.timer = state.autoRefresh ? window.setInterval(() => {
+    if (document.hidden) return;
+    if (state.page === "explorer") refreshExplorer();
+    if (state.page === "contracts") refreshContracts();
+  }, 15000) : null;
 }
 
 document.querySelectorAll("[data-page-target]").forEach((link) => link.addEventListener("click", () => navigate(link.dataset.pageTarget)));
@@ -458,6 +652,10 @@ $("#refresh-explorer").addEventListener("click", refreshExplorer);
 $("#refresh-nodes").addEventListener("click", refreshNodes);
 $("#refresh-validators").addEventListener("click", refreshValidators);
 $("#refresh-contracts").addEventListener("click", refreshContracts);
+$("#add-contract").addEventListener("click", () => $("#contract-dialog").showModal());
+$("#add-contract-form").addEventListener("submit", submitContract);
+$("#close-contract-dialog").addEventListener("click", () => $("#contract-dialog").close());
+$("#cancel-add-contract").addEventListener("click", () => $("#contract-dialog").close());
 $("#toggle-refresh").addEventListener("click", (event) => { state.autoRefresh = !state.autoRefresh; event.target.textContent = state.autoRefresh ? "Pause auto-refresh" : "Resume auto-refresh"; scheduleRefresh(); });
 $("#block-search").addEventListener("submit", searchBlock);
 $("#transaction-search").addEventListener("submit", searchTransaction);
@@ -466,6 +664,7 @@ $("#contract-transactions-search").addEventListener("submit", searchContractTran
 $("#console-form").addEventListener("submit", sendConsoleRequest);
 $("#close-dialog").addEventListener("click", () => $("#detail-dialog").close());
 $("#detail-dialog").addEventListener("click", (event) => { if (event.target === event.currentTarget) event.currentTarget.close(); });
+document.querySelectorAll("[data-detail-tab]").forEach((button) => button.addEventListener("click", () => selectDetailTab(button.dataset.detailTab)));
 
 (async function initialize() {
   initializeConsole();

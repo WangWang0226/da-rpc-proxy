@@ -9,8 +9,8 @@ GET or POST /api?module=<module>&action=<action>&...
 
 Every action is resolved through an explicit allowlist and a bounded set of
 Besu JSON-RPC calls. Allowlisted contract logs and top-level transactions are
-handled by the small SQLite indexer; there is no arbitrary method pass-through,
-PostgreSQL, or Redis.
+handled by the small tmpfs SQLite indexer; there is no arbitrary method
+pass-through, PostgreSQL, or Redis.
 
 ## Documentation and test clients
 
@@ -83,7 +83,7 @@ index-discovery extension, 3 health checks, and the OpenAPI endpoint.
 ## Lightweight indexer boundary
 
 `logs.getLogs` searches only configured contract addresses and topics that
-have already been persisted to SQLite. It supports block range, address,
+have already been indexed into SQLite. It supports block range, address,
 `topic0` through `topic3` (AND), pagination, and ascending/descending order.
 It does not scan arbitrary historical logs from Besu on demand.
 
@@ -117,9 +117,23 @@ Old `/api/v2/...` blockchain routes return HTTP 404.
 
 ## Internal UI routes
 
-`/internal/ui/config`, `/internal/ui/explorer`, `/internal/ui/nodes/status`, and
-`/internal/ui/validators` support the private browser UI. They aggregate live
-Besu state, are not Blockscout/Etherscan-compatible customer endpoints, and are
-therefore deliberately excluded from the support percentage, OpenAPI document,
-and Postman collection. They must not be presented to Fireblocks as public API
-contract surface.
+The following routes support the private browser UI:
+
+| Method and route | Purpose |
+| --- | --- |
+| `GET /internal/ui/config` | Server-defined node choices |
+| `GET /internal/ui/explorer` | Recent Besu blocks and transactions |
+| `GET /internal/ui/nodes/status` | Node, peer, and tx-pool status |
+| `GET /internal/ui/validators` | QBFT validators and pending votes |
+| `GET /internal/ui/transaction` | Aggregated transaction, receipt, and block details |
+| `GET /internal/ui/indexer/status` | Overall and per-contract sync/storage status |
+| `GET /internal/ui/contracts` | Tracked contracts and current progress |
+| `POST /internal/ui/contracts` | Add a bytecode-validated tracked contract |
+| `PATCH /internal/ui/contracts/{address}` | Pause or resume a contract |
+| `POST /internal/ui/contracts/{address}/reindex` | Reset one contract's ephemeral index |
+| `DELETE /internal/ui/contracts/{address}` | Stop tracking, optionally purge current rows |
+
+Mutation routes can be protected with `CONTRACT_ADMIN_TOKEN`. All internal UI
+routes are deliberately excluded from the support percentage, public OpenAPI,
+and Postman collection because they are not Blockscout/Etherscan customer
+contract surface and must not be presented to Fireblocks as such.
